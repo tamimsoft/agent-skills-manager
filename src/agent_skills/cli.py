@@ -40,6 +40,12 @@ def _build_parser():
     # init
     p = sub.add_parser("init", help="create manifest with empty selection")
     p.add_argument("--name", default=None)
+    p.add_argument("--interactive", action="store_true", help="run interactive selection after detection")
+
+    # select
+    p = sub.add_parser("select", help="interactively select skills from recommendations")
+    p.add_argument("--limit", type=int, default=20)
+    p.add_argument("--all", action="store_true")
 
     # add
     p = sub.add_parser("add", help="add skills by dir_name")
@@ -186,6 +192,78 @@ def cmd_list(args, cfg):
     return 0 if not errors else 1
 
 
+def interactive_select(records, techs, limit=20, show_all=False):
+    """Show numbered recommendations; toggle by number; confirm with Enter. Returns list of dir_names."""
+    from agent_skills.recommend import recommend
+    recs = recommend(records, techs, limit=limit, all_results=show_all)
+    if not recs:
+        print("No recommendations.")
+        return []
+    chosen = set()
+    while True:
+        print("\nRecommendations (toggle numbers, Enter to confirm, 'q' to cancel):")
+        for i, r in enumerate(recs, start=1):
+            mark = "x" if r["record"]["dir_name"] in chosen else " "
+            print("  [%s] %2d. %s (score=%d)" % (mark, i, r["record"]["dir_name"], r["score"]))
+        try:
+            raw = input("> ").strip()
+        except EOFError:
+            raw = ""
+        if raw.lower() in ("", "done", "ok"):
+            break
+        if raw.lower() == "q":
+            return []
+        for tok in raw.split():
+            try:
+                idx = int(tok)
+            except ValueError:
+                continue
+            if 1 <= idx <= len(recs):
+                name = recs[idx - 1]["record"]["dir_name"]
+                if name in chosen:
+                    chosen.discard(name)
+                else:
+                    chosen.add(name)
+    return sorted(chosen)
+
+
+def cmd_select(args, cfg):
+    try:
+        root = find_project_root(for_init=True)
+    except ValueError as e:
+        print("error: %s" % e, file=sys.stderr)
+        return 1
+    techs = detect_technologies(root)
+    library_root, records, warnings, errors = _discover(cfg, no_cache=getattr(args, "no_cache", False))
+    if errors:
+        for e in errors:
+            print("error: %s" % e, file=sys.stderr)
+        return 1
+    if not sys.stdin.isatty() and not getattr(args, "yes", False):
+        print("error: interactive selection requires a TTY or --yes", file=sys.stderr)
+        return 4
+    chosen = interactive_select(records, techs, limit=getattr(args, "limit", 20), show_all=getattr(args, "all", False))
+    if not chosen:
+        print("No skills selected.")
+        return 0
+    man, errs = load_manifest(root)
+    if man is None:
+        man = default_manifest(root.name)
+    sel = selected_ids(man)
+    for sid in chosen:
+        if sid not in sel:
+            sel.append(sid)
+    man.setdefault("skills", {})["selected"] = sel
+    if not _confirm("Select %s?" % ", ".join(chosen), getattr(args, "yes", False)):
+        if not sys.stdin.isatty() and not getattr(args, "yes", False):
+            print("error: confirmation required (non-TTY); use --yes", file=sys.stderr)
+            return 4
+        return 0
+    save_manifest(root, man)
+    print("Updated %s" % manifest_path(root))
+    return 0
+
+
 def cmd_init(args, cfg):
     try:
         root = find_project_root(for_init=True)
@@ -214,6 +292,18 @@ def cmd_init(args, cfg):
     print("\nRecommended skills (not auto-selected):")
     for r in recs_list:
         print("  - %s (score=%d): %s" % (r["dir_name"], r["score"], "; ".join(r["reasons"])))
+    if getattr(args, "interactive", False) and (sys.stdin.isatty() or getattr(args, "yes", False)):
+        chosen = interactive_select(records, techs, limit=20)
+        if chosen:
+            sel = selected_ids(man) if man is not None else []
+            for sid in chosen:
+                if sid not in sel:
+                    sel.append(sid)
+            man.setdefault("skills", {})["selected"] = sel
+            if _confirm("Create manifest with selection %s?" % ", ".join(chosen), getattr(args, "yes", False)):
+                save_manifest(root, man)
+                print("Created %s" % mp)
+                return 0
     if not mp.exists():
         if not _confirm("Create manifest with empty selection?", getattr(args, "yes", False)):
             if not sys.stdin.isatty() and not getattr(args, "yes", False):
@@ -489,6 +579,8 @@ def main(argv=None):
         return cmd_list(args, cfg)
     if cmd == "init":
         return cmd_init(args, cfg)
+    if cmd == "select":
+        return cmd_select(args, cfg)
     if cmd == "add":
         return cmd_add(args, cfg)
     if cmd == "remove":
