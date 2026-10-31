@@ -200,9 +200,9 @@ def _curses_available():
         return False
 
 
-def _curses_select(recs):
+def _curses_select(recs, initial_chosen=None):
     import curses
-    chosen = set()
+    chosen = set(initial_chosen or set())
     idx = [0]
 
     def draw(stdscr):
@@ -250,21 +250,24 @@ def _curses_select(recs):
     return sorted(chosen)
 
 
-def interactive_select(records, techs, limit=20, show_all=False):
-    """Show recommendations; navigate arrows, toggle Space, confirm Enter. Falls back to numbered mode."""
+def interactive_select(records, techs, limit=20, show_all=False, initial_selected=None):
     from agent_skills.recommend import recommend
     recs = recommend(records, techs, limit=limit, all_results=show_all)
+    rec_names = {r["record"]["dir_name"] for r in recs}
+    for r in records:
+        if r["dir_name"] in (initial_selected or set()) and r["dir_name"] not in rec_names:
+            recs.insert(0, {"record": r, "score": 0, "reasons": ["currently selected"]})
     if not recs:
         print("No recommendations.")
         return []
 
     if _curses_available() and sys.stdin.isatty() and sys.stdout.isatty():
         try:
-            return _curses_select(recs)
+            return _curses_select(recs, initial_chosen=set(initial_selected or set()))
         except Exception:
             pass
 
-    chosen = set()
+    chosen = set(initial_selected or set())
     while True:
         print("\\nRecommendations (toggle numbers, Enter to confirm, 'q' to cancel):")
         for i, r in enumerate(recs, start=1):
@@ -335,21 +338,20 @@ def cmd_select(args, cfg):
         for e in errors:
             print("error: %s" % e, file=sys.stderr)
         return 1
+    man, _ = load_manifest(root)
+    initial = set(selected_ids(man)) if man else set()
     if not sys.stdin.isatty() and not getattr(args, "yes", False):
         print("error: interactive selection requires a TTY or --yes", file=sys.stderr)
         return 4
-    chosen = interactive_select(records, techs, limit=getattr(args, "limit", 20), show_all=getattr(args, "all", False))
+    chosen = interactive_select(records, techs, limit=getattr(args, "limit", 20), show_all=getattr(args, "all", False), initial_selected=initial)
     if not chosen:
         print("No skills selected.")
         return 0
     man, errs = load_manifest(root)
     if man is None:
         man = default_manifest(root.name)
-    sel = selected_ids(man)
-    for sid in chosen:
-        if sid not in sel:
-            sel.append(sid)
-    man.setdefault("skills", {})["selected"] = sel
+    # Replace selection entirely so unchecked skills are removed.
+    man.setdefault("skills", {})["selected"] = list(chosen)
     if not _confirm("Select %s?" % ", ".join(chosen), getattr(args, "yes", False)):
         if not sys.stdin.isatty() and not getattr(args, "yes", False):
             print("error: confirmation required (non-TTY); use --yes", file=sys.stderr)
