@@ -1,0 +1,516 @@
+"""CLI for the agent skill manager."""
+
+import argparse
+import json
+import os
+import sys
+
+from agent_skills import __version__
+from agent_skills.config import load_config, resolve_library_root, default_config
+from agent_skills.discovery import discover_skills, DiscoveryError
+from agent_skills.manifest import (
+    manifest_path, load_manifest, save_manifest, default_manifest, selected_ids, validate_manifest,
+)
+from agent_skills.project import find_project_root
+from agent_skills.detection import detect_technologies
+from agent_skills.recommend import recommend
+from agent_skills.links import generate_project_skills_dir, read_marker
+from agent_skills.lock import AdvisoryLock, LockError
+from agent_skills import identity
+
+
+def _build_parser():
+    parser = argparse.ArgumentParser(prog="agent-skills", description="Global agent skill manager")
+    parser.add_argument("--version", action="version", version="agent-skills %s" % __version__)
+    parser.add_argument("--json", action="store_true", help="machine-readable output")
+    parser.add_argument("--no-cache", action="store_true", help="bypass discovery cache")
+    parser.add_argument("--yes", action="store_true", help="accept confirmations")
+    parser.add_argument("--dry-run", action="store_true", help="show changes, change nothing")
+
+    sub = parser.add_subparsers(dest="command")
+
+    # list
+    p = sub.add_parser("list", help="list library skills")
+    p.add_argument("--selected", action="store_true")
+    p.add_argument("--filter", default="")
+    p.add_argument("--tech", default="")
+    p.add_argument("--json", action="store_true", dest="json_out")
+    p.add_argument("--no-cache", action="store_true", dest="no_cache")
+
+    # init
+    p = sub.add_parser("init", help="create manifest with empty selection")
+    p.add_argument("--name", default=None)
+
+    # add
+    p = sub.add_parser("add", help="add skills by dir_name")
+    p.add_argument("skills", nargs="+")
+
+    # remove
+    p = sub.add_parser("remove", help="remove skills from manifest")
+    p.add_argument("skills", nargs="+")
+
+    # detect
+    sub.add_parser("detect", help="show detected technologies")
+
+    # recommend
+    p = sub.add_parser("recommend", help="show scored recommendations")
+    p.add_argument("--all", action="store_true")
+    p.add_argument("--limit", type=int, default=20)
+
+    # validate
+    sub.add_parser("validate", help="validate config, manifest, library")
+
+    # sync
+    sub.add_parser("sync", help="regenerate generated state from manifest")
+
+    # doctor
+    sub.add_parser("doctor", help="environment checks")
+
+    # clean
+    sub.add_parser("clean", help="remove orphaned generated directories")
+    p.add_argument("--dry-run", action="store_true", dest="dry_run")
+
+    # junie
+    p = sub.add_parser("junie", help="launch Junie with managed skills")
+    p.add_argument("--prepare", action="store_true")
+    p.add_argument("args", nargs=argparse.REMAINDER)
+
+    # opencode
+    p = sub.add_parser("opencode", help="OpenCode subcommands")
+    sp = p.add_subparsers(dest="oc_sub")
+    for name in ("plan", "apply", "validate", "run"):
+        sp.add_parser(name, help="%s OpenCode config" % name)
+
+    return parser
+
+
+def _is_tty():
+    return sys.stdin.isatty()
+
+
+def _confirm(prompt, yes):
+    if yes:
+        return True
+    if not _is_tty():
+        return False
+    try:
+        ans = input(prompt + " [y/N] ").strip().lower()
+    except EOFError:
+        return False
+    return ans in ("y", "yes")
+
+
+def _cfg_and_root(args, for_init=False):
+    cfg, cfg_errs = load_config()
+    if cfg is None:
+        cfg = default_config()
+    try:
+        root = find_project_root(for_init=for_init)
+    except ValueError as e:
+        root = None
+        if not for_init:
+            # init can use git top-level
+            try:
+                root = find_project_root(for_init=True)
+            except ValueError:
+                root = None
+    return cfg, cfg_errs, root
+
+
+def _discover(cfg, no_cache=False):
+    library_root = resolve_library_root(cfg)
+    overrides = cfg.get("skill_overrides", {}) if isinstance(cfg, dict) else {}
+    allowed_roots = cfg.get("allowed_roots", []) if isinstance(cfg, dict) else []
+    from agent_skills.cache import cache_path
+    cache_file = cache_path(cfg.get("generated_root") if isinstance(cfg, dict) else None)
+    records, warnings, errors = discover_skills(
+        library_root=library_root,
+        allowed_roots=allowed_roots,
+        overrides=overrides,
+        no_cache=no_cache,
+        cache_file=cache_file,
+    )
+    return library_root, records, warnings, errors
+
+
+def cmd_list(args, cfg):
+    no_cache = args.no_cache or args.no_cache if hasattr(args, "no_cache") else args.no_cache
+    # normalize
+    no_cache = bool(getattr(args, "no_cache", False))
+    library_root, records, warnings, errors = _discover(cfg, no_cache=no_cache)
+
+    if getattr(args, "tech", ""):
+        tech = args.tech.lower()
+        records = [r for r in records if tech in (r.get("dir_name") or "").lower()
+                   or tech in (r.get("declared_name") or "").lower()]
+
+    filt = (getattr(args, "filter", "") or "").strip().lower()
+    if filt:
+        records = [r for r in records if filt in (r.get("dir_name") or "").lower()
+                   or filt in (r.get("declared_name") or "").lower()
+                   or filt in (r.get("description") or "").lower()]
+
+    if getattr(args, "selected", False):
+        try:
+            root = find_project_root()
+            m, _ = load_manifest(root)
+            sel = set(selected_ids(m)) if m else set()
+            records = [r for r in records if r["dir_name"] in sel]
+        except ValueError:
+            records = []
+
+    json_out = getattr(args, "json_out", False) or getattr(args, "json", False)
+    if json_out:
+        print(json.dumps({
+            "library_root": str(library_root),
+            "count": len(records),
+            "skills": [{"dir_name": r["dir_name"], "declared_name": r["declared_name"],
+                        "description": r["description"], "frontmatter_status": r["frontmatter_status"]}
+                       for r in records],
+            "warnings": warnings,
+            "errors": errors,
+        }, indent=2))
+    else:
+        print("Library: %s" % library_root)
+        print("Skills: %d" % len(records))
+        for r in records:
+            desc = r["description"] or ""
+            if len(desc) > 80:
+                desc = desc[:77] + "..."
+            print("- %s  [%s]  %s" % (r["dir_name"], r["frontmatter_status"], desc))
+        if warnings:
+            print("\nWarnings: %d" % len(warnings))
+        if errors:
+            print("Errors: %d" % len(errors), file=sys.stderr)
+    return 0 if not errors else 1
+
+
+def cmd_init(args, cfg):
+    try:
+        root = find_project_root(for_init=True)
+    except ValueError as e:
+        print("error: %s" % e, file=sys.stderr)
+        return 1
+    mp = manifest_path(root)
+    if mp.exists():
+        print("manifest already exists: %s" % mp)
+        # still show detection
+    name = args.name or root.name
+    man = default_manifest(name)
+    # detect
+    techs = detect_technologies(root)
+    recs_list = []
+    try:
+        library_root, records, warnings, errors = _discover(cfg, no_cache=False)
+        recs = recommend(records, techs, limit=20)
+        recs_list = [{"dir_name": r["record"]["dir_name"], "score": r["score"], "reasons": r["reasons"]} for r in recs]
+    except Exception as e:
+        warnings = [str(e)]
+    print("Project root: %s" % root)
+    print("Detected technologies:")
+    for t in techs:
+        print("  - %s (%s)" % (t["name"], ", ".join(e["file"] for e in t["evidence"])))
+    print("\nRecommended skills (not auto-selected):")
+    for r in recs_list:
+        print("  - %s (score=%d): %s" % (r["dir_name"], r["score"], "; ".join(r["reasons"])))
+    if not mp.exists():
+        if not _confirm("Create manifest with empty selection?", getattr(args, "yes", False)):
+            if not sys.stdin.isatty() and not getattr(args, "yes", False):
+                print("error: confirmation required (non-TTY); use --yes", file=sys.stderr)
+                return 4
+            return 0
+        save_manifest(root, man)
+        print("Created %s" % mp)
+    return 0
+
+
+def cmd_add(args, cfg):
+    try:
+        root = find_project_root()
+    except ValueError as e:
+        print("error: %s" % e, file=sys.stderr)
+        return 1
+    man, errs = load_manifest(root)
+    if man is None:
+        print("error: %s" % "; ".join(errs), file=sys.stderr)
+        return 1
+    library_root, records, warnings, errors = _discover(cfg, no_cache=False)
+    known = {r["dir_name"]: r for r in records}
+    sel = selected_ids(man)
+    for sid in args.skills:
+        if sid not in known:
+            print("error: unknown skill %r" % sid, file=sys.stderr)
+            return 1
+        if sid in sel:
+            print("error: already selected %r" % sid, file=sys.stderr)
+            return 1
+        sel.append(sid)
+    man.setdefault("skills", {})["selected"] = sel
+    if not _confirm("Add %s to manifest?" % ", ".join(args.skills), getattr(args, "yes", False)):
+        if not sys.stdin.isatty() and not getattr(args, "yes", False):
+            print("error: confirmation required (non-TTY); use --yes", file=sys.stderr)
+            return 4
+        return 0
+    save_manifest(root, man)
+    print("Updated %s" % manifest_path(root))
+    return 0
+
+
+def cmd_remove(args, cfg):
+    try:
+        root = find_project_root()
+    except ValueError as e:
+        print("error: %s" % e, file=sys.stderr)
+        return 1
+    man, errs = load_manifest(root)
+    if man is None:
+        print("error: %s" % "; ".join(errs), file=sys.stderr)
+        return 1
+    sel = selected_ids(man)
+    for sid in args.skills:
+        if sid not in sel:
+            print("error: not selected %r" % sid, file=sys.stderr)
+            return 1
+    new_sel = [s for s in sel if s not in args.skills]
+    man.setdefault("skills", {})["selected"] = new_sel
+    if not _confirm("Remove %s from manifest?" % ", ".join(args.skills), getattr(args, "yes", False)):
+        if not sys.stdin.isatty() and not getattr(args, "yes", False):
+            print("error: confirmation required (non-TTY); use --yes", file=sys.stderr)
+            return 4
+        return 0
+    save_manifest(root, man)
+    print("Updated %s" % manifest_path(root))
+    return 0
+
+
+def cmd_detect(args, cfg):
+    try:
+        root = find_project_root(for_init=True)
+    except ValueError as e:
+        print("error: %s" % e, file=sys.stderr)
+        return 1
+    techs = detect_technologies(root)
+    if getattr(args, "json", False):
+        print(json.dumps(techs, indent=2))
+    else:
+        for t in techs:
+            print("%s: %s" % (t["name"], ", ".join(e["file"] for e in t["evidence"])))
+    return 0
+
+
+def cmd_recommend(args, cfg):
+    try:
+        root = find_project_root(for_init=True)
+    except ValueError as e:
+        print("error: %s" % e, file=sys.stderr)
+        return 1
+    techs = detect_technologies(root)
+    library_root, records, warnings, errors = _discover(cfg, no_cache=getattr(args, "no_cache", False))
+    recs = recommend(records, techs, limit=getattr(args, "limit", 20), all_results=getattr(args, "all", False))
+    if getattr(args, "json", False):
+        print(json.dumps([{"dir_name": r["record"]["dir_name"], "score": r["score"], "reasons": r["reasons"]} for r in recs], indent=2))
+    else:
+        for r in recs:
+            print("%s  score=%d  %s" % (r["record"]["dir_name"], r["score"], "; ".join(r["reasons"])))
+    return 0
+
+
+def cmd_validate(args, cfg):
+    # config
+    cfg2, cfg_errs = load_config()
+    ok = True
+    if cfg_errs:
+        ok = False
+        print("config errors: %s" % "; ".join(cfg_errs))
+    # library
+    try:
+        library_root, records, warnings, errors = _discover(cfg, no_cache=True)
+        if errors:
+            ok = False
+            for e in errors:
+                print("discovery error: %s" % e)
+        print("library: %s (%d skills)" % (library_root, len(records)))
+    except Exception as e:
+        ok = False
+        print("discovery failed: %s" % e)
+    # manifest
+    try:
+        root = find_project_root()
+        man, merrs = load_manifest(root)
+        if merrs:
+            ok = False
+            for e in merrs:
+                print("manifest error: %s" % e)
+        else:
+            # validate selected exist
+            sel = selected_ids(man)
+            rec_map = {r["dir_name"]: r for r in records} if "records" in locals() else {}
+            for sid in sel:
+                if sid not in rec_map and rec_map:
+                    ok = False
+                    print("manifest references missing skill: %s" % sid)
+            print("manifest: %s (selected=%d)" % (manifest_path(root), len(sel)))
+    except ValueError as e:
+        print("no project root: %s" % e)
+    return 0 if ok else 3
+
+
+def cmd_sync(args, cfg):
+    try:
+        root = find_project_root()
+    except ValueError as e:
+        print("error: %s" % e, file=sys.stderr)
+        return 1
+    man, errs = load_manifest(root)
+    if man is None:
+        print("error: %s" % "; ".join(errs), file=sys.stderr)
+        return 1
+    sel = selected_ids(man)
+    library_root, records, warnings, errors = _discover(cfg, no_cache=False)
+    rec_map = {r["dir_name"]: r for r in records}
+    selected_records = []
+    for sid in sel:
+        if sid in rec_map:
+            selected_records.append(rec_map[sid])
+        else:
+            print("error: selected skill missing from library: %s" % sid, file=sys.stderr)
+            return 1
+    generated_root = cfg.get("generated_root") if isinstance(cfg, dict) else None
+    from pathlib import Path
+    if not generated_root:
+        generated_root = str(Path.home() / ".local" / "share" / "agent-skills" / "projects")
+    # project key
+    import hashlib
+    key = "%s-%s" % (root.name, hashlib.sha256(str(root.resolve()).encode()).hexdigest()[:12])
+    gen_dir = Path(generated_root) / key
+    if getattr(args, "dry_run", False) or getattr(args, "dry-run", False):
+        print("would generate: %s with %d skills" % (gen_dir, len(selected_records)))
+        return 0
+    lock_path = Path(generated_root) / ".lock"
+    try:
+        with AdvisoryLock(lock_path):
+            generate_project_skills_dir(
+                gen_dir, selected_records, library_root,
+                allowed_roots=cfg.get("allowed_roots", []) if isinstance(cfg, dict) else [],
+                project_key=key,
+            )
+    except LockError as e:
+        print("error: %s" % e, file=sys.stderr)
+        return 1
+    print("generated: %s" % gen_dir)
+    return 0
+
+
+def cmd_doctor(args, cfg):
+    import shutil
+    from pathlib import Path
+    print("Python: %s" % sys.version.split()[0])
+    print("agent-skills: %s" % __version__)
+    # PATH check
+    path = os.environ.get("PATH", "")
+    local_bin = str(Path.home() / ".local" / "bin")
+    print("~/.local/bin on PATH: %s" % (local_bin in path.split(os.pathsep)))
+    if local_bin not in path.split(os.pathsep):
+        print("  add to ~/.zshrc: export PATH=\"$HOME/.local/bin:$PATH\"")
+    # agent versions
+    tested = cfg.get("tested_agent_versions", {}) if isinstance(cfg, dict) else {}
+    for agent, ver in tested.items():
+        print("tested %s: %s" % (agent, ver))
+    # library
+    try:
+        library_root, records, warnings, errors = _discover(cfg, no_cache=True)
+        print("library: %s (%d skills, %d warnings, %d errors)" % (library_root, len(records), len(warnings), len(errors)))
+    except Exception as e:
+        print("library check failed: %s" % e)
+    return 0
+
+
+def cmd_clean(args, cfg):
+    generated_root = cfg.get("generated_root") if isinstance(cfg, dict) else None
+    from pathlib import Path
+    if not generated_root:
+        generated_root = str(Path.home() / ".local" / "share" / "agent-skills" / "projects")
+    gr = Path(generated_root)
+    if not gr.exists():
+        print("nothing to clean")
+        return 0
+    orphans = []
+    for d in gr.iterdir():
+        if not d.is_dir():
+            continue
+        marker = read_marker(d)
+        if marker is None:
+            continue
+        pk = marker.get("project_key", "")
+        # We don't store root in manifest; heuristic: if name prefix root no longer exists? 
+        # Clean only if marker exists but directory is stale? For Phase 3, list managed dirs.
+        orphans.append(d)
+    dry = getattr(args, "dry_run", False) or getattr(args, "dry-run", False)
+    for d in orphans:
+        if dry:
+            print("would remove: %s" % d)
+        else:
+            if _confirm("Remove %s?" % d, getattr(args, "yes", False)):
+                import shutil
+                shutil.rmtree(d)
+                print("removed: %s" % d)
+    if not orphans:
+        print("no managed directories found")
+    return 0
+
+
+def cmd_junie(args, cfg):
+    # Phase 5: managed launch. Implement basic.
+    from agent_skills.adapters.junie import launch_junie
+    return launch_junie(args, cfg)
+
+
+def cmd_opencode(args, cfg):
+    from agent_skills.adapters.opencode import run_opencode_subcommand
+    return run_opencode_subcommand(args, cfg)
+
+
+def main(argv=None):
+    if argv is None:
+        argv = sys.argv[1:]
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+
+    cfg, cfg_errs = load_config()
+    if cfg is None:
+        cfg = default_config()
+
+    cmd = args.command
+    if cmd is None:
+        parser.print_help()
+        return 0
+    if cmd == "list":
+        return cmd_list(args, cfg)
+    if cmd == "init":
+        return cmd_init(args, cfg)
+    if cmd == "add":
+        return cmd_add(args, cfg)
+    if cmd == "remove":
+        return cmd_remove(args, cfg)
+    if cmd == "detect":
+        return cmd_detect(args, cfg)
+    if cmd == "recommend":
+        return cmd_recommend(args, cfg)
+    if cmd == "validate":
+        return cmd_validate(args, cfg)
+    if cmd == "sync":
+        return cmd_sync(args, cfg)
+    if cmd == "doctor":
+        return cmd_doctor(args, cfg)
+    if cmd == "clean":
+        return cmd_clean(args, cfg)
+    if cmd == "junie":
+        return cmd_junie(args, cfg)
+    if cmd == "opencode":
+        return cmd_opencode(args, cfg)
+    parser.print_help()
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
