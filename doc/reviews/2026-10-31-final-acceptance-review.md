@@ -13,7 +13,8 @@
 
 ## Manual verification (pending / recorded)
 
-- V1-V5, V7-V9 require real-agent sessions; procedures documented in `initial-environment-review.md`.
+- Automated capture of real-agent skill lists was attempted (OpenCode and Junie) but both model calls timed out / produced no usable output in this environment. Procedures remain documented in `initial-environment-review.md` and must be run interactively to close these items.
+- V1-V5, V7-V9: pending interactive run.
 - OpenCode custom skill (`flutter-tamim`, `hive-db-tamim`) availability: pending real-agent check.
 - Junie custom skill wrapper: pending real-agent check.
 
