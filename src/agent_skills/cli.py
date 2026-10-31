@@ -79,7 +79,8 @@ def _build_parser():
     p = sub.add_parser("opencode", help="OpenCode subcommands")
     sp = p.add_subparsers(dest="oc_sub")
     for name in ("plan", "apply", "validate", "run"):
-        sp.add_parser(name, help="%s OpenCode config" % name)
+        subp = sp.add_parser(name, help="%s OpenCode config" % name)
+        subp.add_argument("args", nargs=argparse.REMAINDER)
 
     return parser
 

@@ -210,7 +210,7 @@ def run(cfg, extra=None):
     if rc != 0:
         print(msg, file=sys.stderr)
         return rc
-    argv = [_opencode_exe(cfg)] + (extra or [])
+    argv = [_opencode_exe(cfg), "run"] + (extra or [])
     os.execvp(argv[0], argv)
     return 0
 

@@ -56,7 +56,7 @@ def launch_junie(args, cfg):
         return 1
 
     sel = selected_ids(man)
-    library_root, records, warnings, errors = discover_skills(
+    records, warnings, errors = discover_skills(
         library_root=resolve_library_root(cfg),
         allowed_roots=cfg.get("allowed_roots", []) if isinstance(cfg, dict) else [],
         overrides=cfg.get("skill_overrides", {}) if isinstance(cfg, dict) else {},
