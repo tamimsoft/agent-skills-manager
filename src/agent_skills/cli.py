@@ -192,8 +192,104 @@ def cmd_list(args, cfg):
     return 0 if not errors else 1
 
 
+def _curses_available():
+    try:
+        import curses
+        return True
+    except Exception:
+        return False
+
+
+def _curses_select(recs):
+    import curses
+    chosen = set()
+    idx = [0]
+
+    def draw(stdscr):
+        curses.curs_set(0)
+        stdscr.keypad(True)
+        while True:
+            stdscr.clear()
+            h, w = stdscr.getmaxyx()
+            try:
+                stdscr.addstr(0, 0, "Recommendations: Up/Down move, Space toggle, Enter confirm, q cancel")
+            except curses.error:
+                pass
+            for i, r in enumerate(recs):
+                name = r["record"]["dir_name"]
+                mark = "x" if name in chosen else " "
+                line = "  [%s] %s (score=%d)" % (mark, name, r["score"])
+                try:
+                    if i == idx[0]:
+                        stdscr.attron(curses.A_REVERSE)
+                        stdscr.addstr(i + 2, 0, line[: max(1, w - 1)])
+                        stdscr.attroff(curses.A_REVERSE)
+                    else:
+                        stdscr.addstr(i + 2, 0, line[: max(1, w - 1)])
+                except curses.error:
+                    pass
+            stdscr.refresh()
+            key = stdscr.getch()
+            if key == curses.KEY_UP:
+                idx[0] = max(0, idx[0] - 1)
+            elif key == curses.KEY_DOWN:
+                idx[0] = min(len(recs) - 1, idx[0] + 1)
+            elif key == ord(" "):
+                name = recs[idx[0]]["record"]["dir_name"]
+                if name in chosen:
+                    chosen.discard(name)
+                else:
+                    chosen.add(name)
+            elif key in (10, 13, curses.KEY_ENTER):
+                return
+            elif key in (ord("q"), ord("Q"), 27):
+                chosen.clear()
+                return
+
+    curses.wrapper(draw)
+    return sorted(chosen)
+
+
 def interactive_select(records, techs, limit=20, show_all=False):
-    """Show numbered recommendations; toggle by number; confirm with Enter. Returns list of dir_names."""
+    """Show recommendations; navigate arrows, toggle Space, confirm Enter. Falls back to numbered mode."""
+    from agent_skills.recommend import recommend
+    recs = recommend(records, techs, limit=limit, all_results=show_all)
+    if not recs:
+        print("No recommendations.")
+        return []
+
+    if _curses_available() and sys.stdin.isatty() and sys.stdout.isatty():
+        try:
+            return _curses_select(recs)
+        except Exception:
+            pass
+
+    chosen = set()
+    while True:
+        print("\\nRecommendations (toggle numbers, Enter to confirm, 'q' to cancel):")
+        for i, r in enumerate(recs, start=1):
+            mark = "x" if r["record"]["dir_name"] in chosen else " "
+            print("  [%s] %2d. %s (score=%d)" % (mark, i, r["record"]["dir_name"], r["score"]))
+        try:
+            raw = input("> ").strip()
+        except EOFError:
+            raw = ""
+        if raw.lower() in ("", "done", "ok"):
+            break
+        if raw.lower() == "q":
+            return []
+        for tok in raw.split():
+            try:
+                idx = int(tok)
+            except ValueError:
+                continue
+            if 1 <= idx <= len(recs):
+                name = recs[idx - 1]["record"]["dir_name"]
+                if name in chosen:
+                    chosen.discard(name)
+                else:
+                    chosen.add(name)
+    return sorted(chosen)
     from agent_skills.recommend import recommend
     recs = recommend(records, techs, limit=limit, all_results=show_all)
     if not recs:
