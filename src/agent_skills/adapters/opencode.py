@@ -21,9 +21,18 @@ def _opencode_exe(cfg):
 
 
 def _permission_rules(selected_agent_ids):
+    # V2 permissions array (execution-time): blocks loading unselected skills.
     rules = [{"action": "skill", "resource": "*", "effect": "deny"}]
     for aid in selected_agent_ids:
         rules.append({"action": "skill", "resource": aid, "effect": "allow"})
+    return rules
+
+
+def _policy_rules(selected_agent_ids):
+    # Policies (binary) actually remove denied skills from the catalog.
+    rules = [{"action": "skill.use", "resource": "*", "effect": "deny"}]
+    for aid in selected_agent_ids:
+        rules.append({"action": "skill.use", "resource": aid, "effect": "allow"})
     return rules
 
 
@@ -62,7 +71,7 @@ def _agent_ids_for_selected(cfg, sel):
     return ids, warnings
 
 
-def _apply_rules_to_config(cfg_obj, new_rules):
+def _apply_rules_to_config(cfg_obj, new_rules, new_policies=None):
     """Return (new_config, changed) preserving unrelated settings."""
     cfg_obj = dict(cfg_obj) if isinstance(cfg_obj, dict) else {}
     perms = cfg_obj.get("permissions")
@@ -76,11 +85,16 @@ def _apply_rules_to_config(cfg_obj, new_rules):
     # The caller passes owned via closure? We'll handle in apply function.
     # Simplest: replace permissions list's skill rules? Instead, append deny+allows at end.
     # To avoid duplicates, remove any prior rules identical to new_rules.
-    filtered = [r for r in perms if r not in new_rules]
-    filtered.extend(new_rules)
-    cfg_obj["permissions"] = filtered
-    # instructions: ensure rules_path present.
-    # (rules_path injected by caller if available; here read from config not passed)
+    kept = [r for r in perms if not (isinstance(r, dict) and r.get("action") == "skill")]
+    kept.extend(new_rules)
+    cfg_obj["permissions"] = kept
+    if new_policies is not None:
+        pols = cfg_obj.get("policies")
+        if not isinstance(pols, list):
+            pols = []
+        kept_p = [r for r in pols if not (isinstance(r, dict) and r.get("action") == "skill.use")]
+        kept_p.extend(new_policies)
+        cfg_obj["policies"] = kept_p
     return cfg_obj
 
 
@@ -108,8 +122,11 @@ def plan(cfg):
         lines.append("WARNING: opencode.jsonc exists; manager will not rewrite it. Resolve manually.")
     lines.append("Selected skills: %s" % ", ".join(sel) if sel else "(none)")
     lines.append("OpenCode agent_ids: %s" % ", ".join(ids) if ids else "(none)")
-    lines.append("Rules to apply:")
+    lines.append("Permission rules to apply:")
     for r in rules:
+        lines.append("  %s" % json.dumps(r))
+    lines.append("Policy rules to apply (removes denied skills from catalog):")
+    for r in _policy_rules(ids):
         lines.append("  %s" % json.dumps(r))
     if oc_path.exists():
         lines.append("Existing opencode.json will be preserved (unrelated settings kept).")
@@ -163,6 +180,7 @@ def apply(cfg, dry_run=False, yes=False):
     except ValueError as e:
         return 1, str(e)
     rules = _permission_rules(ids)
+    policies = _policy_rules(ids)
 
     existing = {}
     if oc_path.exists():
@@ -171,7 +189,7 @@ def apply(cfg, dry_run=False, yes=False):
         except (OSError, ValueError) as e:
             return 1, "invalid existing JSON: %s" % e
 
-    new_config = _apply_rules_to_config(existing, rules)
+    new_config = _apply_rules_to_config(existing, rules, policies)
 
     if dry_run:
         return 0, "would write %s with %d permission rules" % (oc_path, len(rules))
@@ -197,8 +215,9 @@ def apply(cfg, dry_run=False, yes=False):
 
     # Sidecar owned rules.
     sidecar = _sidecar_path(oc_path)
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
     with sidecar.open("w", encoding="utf-8") as f:
-        json.dump({"rules": rules}, f, indent=2)
+        json.dump({"rules": rules, "policies": policies}, f, indent=2)
         f.write("\n")
 
     return 0, "applied: %s" % oc_path
