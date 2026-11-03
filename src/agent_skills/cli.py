@@ -593,6 +593,77 @@ def cmd_select(args, cfg):
     return 0
 
 
+TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
+GLOBAL_TEMPLATES_DIR = Path.home() / ".config" / "agent-skills" / "templates"
+BASE_TEMPLATE_FILENAME = "AGENTS.base.md"
+
+
+def _global_template_path():
+    return GLOBAL_TEMPLATES_DIR / BASE_TEMPLATE_FILENAME
+
+
+def ensure_global_template():
+    """Ensure the global AGENTS.base.md template exists in the user config dir.
+
+    Copies the bundled default template if the global one is missing.
+    Returns the path to the (existing or newly created) global template.
+    """
+    global_tpl = _global_template_path()
+    if not global_tpl.exists():
+        try:
+            GLOBAL_TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
+            bundled = TEMPLATES_DIR / BASE_TEMPLATE_FILENAME
+            if bundled.exists():
+                import shutil
+                shutil.copy2(str(bundled), str(global_tpl))
+        except OSError:
+            pass
+    return global_tpl
+
+
+def _tech_section(tech):
+    """Return a short AGENTS.md section for a detected technology."""
+    name = tech.get("name", "unknown")
+    evidence = ", ".join(e.get("file", "") for e in tech.get("evidence", []))
+    return "### %s\nDetected via: %s\n" % (name, evidence)
+
+
+def generate_agents_md(root, techs, cfg):
+    """Generate project AGENTS.md from the global base template + tech sections.
+
+    Never overwrites an existing AGENTS.md. If one exists, returns wrote=False
+    with a message so the caller can offer a safe merge.
+    Returns (wrote, message).
+    """
+    agents_md = root / "AGENTS.md"
+    if agents_md.exists():
+        return False, "AGENTS.md already exists at %s; not overwritten. Merge manually or delete and re-run init." % agents_md
+
+    global_tpl = ensure_global_template()
+    parts = []
+    if global_tpl.exists():
+        try:
+            parts.append(global_tpl.read_text(encoding="utf-8"))
+        except OSError:
+            parts.append("# Agent Instructions\n\n(No base template available.)\n")
+    else:
+        parts.append("# Agent Instructions\n\n(No base template available.)\n")
+
+    if techs:
+        parts.append("\n## Project-specific technology guidance\n")
+        for t in techs:
+            parts.append(_tech_section(t))
+
+    parts.append("\n## Agent skills\nSee .agents/skills.json for the selected skill set.\n")
+
+    content = "\n".join(parts)
+    try:
+        agents_md.write_text(content, encoding="utf-8")
+        return True, "Generated AGENTS.md at %s" % agents_md
+    except OSError as e:
+        return False, "Failed to write AGENTS.md: %s" % e
+
+
 def cmd_init(args, cfg):
     try:
         root = find_project_root(for_init=True)
@@ -632,6 +703,8 @@ def cmd_init(args, cfg):
             if _confirm("Create manifest with selection %s?" % ", ".join(chosen), getattr(args, "yes", False)):
                 save_manifest(root, man)
                 print("Created %s" % mp)
+                wrote, msg = generate_agents_md(root, techs, cfg)
+                print(msg)
                 return 0
     if not mp.exists():
         if not _confirm("Create manifest with empty selection?", getattr(args, "yes", False)):
@@ -641,6 +714,10 @@ def cmd_init(args, cfg):
             return 0
         save_manifest(root, man)
         print("Created %s" % mp)
+        wrote, msg = generate_agents_md(root, techs, cfg)
+        print(msg)
+    wrote, msg = generate_agents_md(root, techs, cfg)
+    print(msg)
     return 0
 
 
