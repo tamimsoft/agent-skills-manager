@@ -226,28 +226,44 @@ def _curses_select(recs, initial_chosen=None):
     import curses
     chosen = set(initial_chosen or set())
     idx = [0]
+    search = [""]
+
+    def filtered_recs():
+        s = search[0].lower()
+        if not s:
+            return recs
+        return [r for r in recs if s in (r["record"].get("dir_name") or "").lower()
+                or s in (r["record"].get("declared_name") or "").lower()
+                or s in (r["record"].get("description") or "").lower()]
 
     def draw(stdscr):
         curses.curs_set(0)
         stdscr.keypad(True)
         while True:
+            filtered = filtered_recs()
+            if idx[0] >= len(filtered):
+                idx[0] = max(0, len(filtered) - 1)
             stdscr.clear()
             h, w = stdscr.getmaxyx()
             try:
-                stdscr.addstr(0, 0, "Recommendations: Up/Down move, Space toggle, Enter confirm, q cancel")
+                stdscr.addstr(0, 0, "Search: %s  (type to filter, Backspace clear)" % search[0])
             except curses.error:
                 pass
-            for i, r in enumerate(recs):
+            try:
+                stdscr.addstr(1, 0, "Up/Down move, Space toggle, Enter confirm, q cancel")
+            except curses.error:
+                pass
+            for i, r in enumerate(filtered):
                 name = r["record"]["dir_name"]
                 mark = "x" if name in chosen else " "
                 line = "  [%s] %s (score=%d)" % (mark, name, r["score"])
                 try:
                     if i == idx[0]:
                         stdscr.attron(curses.A_REVERSE)
-                        stdscr.addstr(i + 2, 0, line[: max(1, w - 1)])
+                        stdscr.addstr(i + 3, 0, line[: max(1, w - 1)])
                         stdscr.attroff(curses.A_REVERSE)
                     else:
-                        stdscr.addstr(i + 2, 0, line[: max(1, w - 1)])
+                        stdscr.addstr(i + 3, 0, line[: max(1, w - 1)])
                 except curses.error:
                     pass
             stdscr.refresh()
@@ -255,18 +271,26 @@ def _curses_select(recs, initial_chosen=None):
             if key == curses.KEY_UP:
                 idx[0] = max(0, idx[0] - 1)
             elif key == curses.KEY_DOWN:
-                idx[0] = min(len(recs) - 1, idx[0] + 1)
+                idx[0] = min(len(filtered) - 1, idx[0] + 1)
             elif key == ord(" "):
-                name = recs[idx[0]]["record"]["dir_name"]
-                if name in chosen:
-                    chosen.discard(name)
-                else:
-                    chosen.add(name)
+                if filtered:
+                    name = filtered[idx[0]]["record"]["dir_name"]
+                    if name in chosen:
+                        chosen.discard(name)
+                    else:
+                        chosen.add(name)
             elif key in (10, 13, curses.KEY_ENTER):
                 return
             elif key in (ord("q"), ord("Q"), 27):
                 chosen.clear()
                 return
+            elif key in (curses.KEY_BACKSPACE, 127, 8):
+                if search[0]:
+                    search[0] = search[0][:-1]
+                    idx[0] = 0
+            elif 32 <= key < 127:
+                search[0] += chr(key)
+                idx[0] = 0
 
     curses.wrapper(draw)
     return sorted(chosen)
