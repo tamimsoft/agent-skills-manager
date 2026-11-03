@@ -121,19 +121,27 @@ def _build_wrapper(src_root, dest_root, rec):
 
 
 def _build_skill_entry(src_root, dest_root, rec):
-    """Copy or wrapper a single skill into dest_root. Returns list of
-    managed relative entry names."""
+    """Copy or wrapper a single skill into dest_root/<dir_name>/. Returns
+    list of managed relative entry names."""
+    src_root = Path(src_root)
+    dest_root = Path(dest_root)
     skill_md = src_root / "SKILL.md"
     fm_result = parse_frontmatter(
         skill_md.read_text(encoding="utf-8", errors="replace")
         if skill_md.is_file() else "")
+    dest_entry = dest_root / rec["dir_name"]
     if fm_result.get("status") == "missing":
-        return _build_wrapper(src_root, dest_root, rec)
+        # Wrapper layout for frontmatter-less skill (§11.4): create a
+        # subdirectory named after the skill, regenerate only SKILL.md,
+        # symlink everything else at original relative path.
+        dest_entry.mkdir(parents=True, exist_ok=True)
+        linked = _build_wrapper(src_root, dest_entry, rec)
+        return [rec["dir_name"] + "/" + l for l in linked]
     else:
-        dest_link = dest_root / rec["dir_name"]
-        if dest_link.exists() or dest_link.is_symlink():
-            dest_link.unlink()
-        os.symlink(os.path.realpath(src_root), dest_link)
+        # Direct symlink for skills with valid frontmatter.
+        if dest_entry.exists() or dest_entry.is_symlink():
+            dest_entry.unlink()
+        os.symlink(os.path.realpath(src_root), dest_entry)
         return [rec["dir_name"]]
 
 
@@ -199,6 +207,19 @@ def launch_junie(args, cfg):
             # Build in a temp sibling.
             parent = gen_dir.parent
             parent.mkdir(parents=True, exist_ok=True)
+            # Clean up leftover .tmp-* / .old-* from a crashed run (§5.5).
+            import shutil as _shutil
+            for entry in os.listdir(parent):
+                name = entry
+                if name.startswith(".junie-skills-tmp-") or name.startswith(".junie-skills-old-"):
+                    leftover = parent / name
+                    if leftover.is_dir() and not leftover.is_symlink():
+                        _shutil.rmtree(leftover, ignore_errors=True)
+                    else:
+                        try:
+                            leftover.unlink()
+                        except OSError:
+                            pass
             tmp = Path(tempfile.mkdtemp(prefix=".junie-skills-", dir=str(parent)))
             try:
                 managed_entries = []

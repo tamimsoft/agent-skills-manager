@@ -53,6 +53,19 @@ def generate_project_skills_dir(generated_dir, selected_records, library_root, a
     # Build in a temp sibling directory.
     parent = generated_dir.parent
     parent.mkdir(parents=True, exist_ok=True)
+    # Clean up leftover .tmp-* / .old-* from a crashed run (§5.5).
+    import shutil as _shutil
+    for entry in os.listdir(parent):
+        name = entry
+        if name.startswith(".gen-tmp-") or name.startswith(".gen-old-"):
+            leftover = parent / name
+            if leftover.is_dir() and not leftover.is_symlink():
+                _shutil.rmtree(leftover, ignore_errors=True)
+            else:
+                try:
+                    leftover.unlink()
+                except OSError:
+                    pass
     tmp = Path(tempfile.mkdtemp(prefix=".gen-", dir=str(parent)))
     try:
         managed_entries = []
