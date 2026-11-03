@@ -336,19 +336,25 @@ def _curses_select(recs, initial_chosen=None):
                     name = r["record"]["dir_name"]
                     mark = "x" if name in chosen else " "
                     pct = percents.get(name, 0)
-                    line = "  [%s] %s   %d/10" % (mark, name, pct)
-                    # Right-align the score column.
+                    serial = start + i + 1
+                    left = "  [%s] %2d. %s" % (mark, serial, name)
+                    score_str = "%d/10" % pct
+                    score_x = w - len(score_str) - 1
+                    max_left = max(0, score_x - 1)
+                    left_disp = left[:max_left]
                     try:
                         if i == local_idx:
                             stdscr.attron(curses.color_pair(1) | curses.A_BOLD)
-                            stdscr.addstr(content_top + i, 0, line[: max(1, w - 1)])
-                            stdscr.attroff(curses.color_pair(1) | curses.A_BOLD)
                         else:
                             if name in chosen:
                                 stdscr.attron(curses.color_pair(3))
-                            stdscr.addstr(content_top + i, 0, line[: max(1, w - 1)])
-                            if name in chosen:
-                                stdscr.attroff(curses.color_pair(3))
+                        stdscr.addstr(content_top + i, 0, left_disp[: max(1, w - 1)])
+                        if score_x > len(left_disp):
+                            stdscr.addstr(content_top + i, score_x, score_str[: max(1, w - score_x)])
+                        if i == local_idx:
+                            stdscr.attroff(curses.color_pair(1) | curses.A_BOLD)
+                        elif name in chosen:
+                            stdscr.attroff(curses.color_pair(3))
                     except curses.error:
                         pass
 
@@ -447,11 +453,20 @@ def interactive_select(records, techs, limit=20, show_all=False, initial_selecte
 
     if _curses_available() and sys.stdin.isatty() and sys.stdout.isatty():
         try:
-            # Search bar operates on ALL discovered skills, not just
-            # recommendations, so the user can find any skill by name.
-            all_recs = [
-                {"record": r, "score": 0, "reasons": ["all skills"]} for r in records
-            ]
+            from agent_skills.recommend import score_skill
+            selected_set = set(initial_selected or set())
+            all_recs = []
+            for r in records:
+                s, reasons = score_skill(r, techs)
+                all_recs.append({"record": r, "score": s,
+                                 "reasons": reasons if reasons else ["no strong signal"]})
+            # Previously selected skills first, then descending match score,
+            # then dir_name ascending (deterministic).
+            all_recs.sort(key=lambda x: (
+                x["record"]["dir_name"] not in selected_set,
+                -x["score"],
+                x["record"].get("dir_name", ""),
+            ))
             return _curses_select(all_recs, initial_chosen=set(initial_selected or set()))
         except Exception:
             pass
