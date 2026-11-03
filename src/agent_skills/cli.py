@@ -354,9 +354,14 @@ def _curses_select(recs, initial_chosen=None):
                             stdscr.attron(curses.color_pair(3))
                         stdscr.addstr(content_top + i, 0, left_disp[: max(1, w - 1)])
                         if score_x > len(left_disp):
+                            gap = " " * max(0, score_x - len(left_disp))
                             if i == local_idx:
-                                pass  # already in reverse-video pair 1
+                                stdscr.attron(curses.color_pair(1))
+                                stdscr.addstr(content_top + i, len(left_disp), gap[: max(1, w - len(left_disp))])
+                                stdscr.addstr(content_top + i, score_x, score_str[: max(1, w - score_x)])
+                                stdscr.attroff(curses.color_pair(1))
                             else:
+                                stdscr.addstr(content_top + i, len(left_disp), gap[: max(1, w - len(left_disp))])
                                 if pct >= 10:
                                     stdscr.attron(curses.color_pair(3))
                                 elif pct >= 7:
