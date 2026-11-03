@@ -10,6 +10,7 @@ from agent_skills.config import resolve_library_root
 from agent_skills.discovery import discover_skills, DiscoveryError
 from agent_skills.links import generate_project_skills_dir, read_marker
 from agent_skills.lock import AdvisoryLock, LockError
+from agent_skills.recommend import filter_skills_for_context
 
 
 def _junie_exe(cfg):
@@ -71,13 +72,23 @@ def launch_junie(args, cfg):
             return 1
         selected_records.append(rec_map[sid])
 
+    # Apply context budget filtering: only symlink skills that fit in context.
+    budget_tokens = cfg.get("skill_context_budget_tokens") if isinstance(cfg, dict) else 32768
+    max_skills = cfg.get("max_skills_in_context") if isinstance(cfg, dict) else 50
+    filtered_records, skipped, total_tokens, cwarnings = filter_skills_for_context(
+        selected_records, sel, [], budget_tokens, max_skills,
+    )
+    if cwarnings:
+        for w in cwarnings:
+            print("notice: %s" % w, file=sys.stderr)
+
     gen_dir, key = _generated_dir(cfg, root)
     gen_dir.parent.mkdir(parents=True, exist_ok=True)
     lock_path = gen_dir.parent / ".lock"
     try:
         with AdvisoryLock(lock_path):
             generate_project_skills_dir(
-                gen_dir, selected_records, resolve_library_root(cfg),
+                gen_dir, filtered_records, resolve_library_root(cfg),
                 allowed_roots=cfg.get("allowed_roots", []) if isinstance(cfg, dict) else [],
                 project_key=key,
             )
@@ -97,7 +108,9 @@ def launch_junie(args, cfg):
             return 1
 
     if prepare:
-        print("prepared: %s (%d skills)" % (gen_dir, len(selected_records)))
+        print("prepared: %s (%d skills%s)" % (
+            gen_dir, len(filtered_records),
+            " (%d excluded by context budget)" % skipped if skipped else ""))
         return 0
 
     # Build argv.
@@ -109,8 +122,10 @@ def launch_junie(args, cfg):
         argv += ["--ide-guidelines", str(Path(rules_path).expanduser())]
     argv += passthrough
 
-    if not selected_records:
+    if not filtered_records:
         print("notice: empty selection; no skills loaded", file=sys.stderr)
 
+    sys.stdout.flush()
+    sys.stderr.flush()
     os.execvp(argv[0], argv)
     return 0

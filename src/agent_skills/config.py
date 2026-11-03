@@ -14,6 +14,7 @@ DEFAULT_GENERATED_REL = ".local/share/agent-skills/projects"
 TESTED_AGENT_VERSIONS = {
     "opencode": "2.2.5",
     "junie": "26.10.27",
+    "kilo": "7.8.18",
 }
 
 
@@ -42,6 +43,8 @@ def default_config():
         "rules_path": str(h / ".config" / "agent-skills" / "rules.md"),
         "agent_paths": {},
         "skill_overrides": {},
+        "skill_context_budget_tokens": 32768,
+        "max_skills_in_context": 50,
         "tested_agent_versions": dict(TESTED_AGENT_VERSIONS),
     }
 
@@ -71,6 +74,14 @@ def _validate(cfg):
         for k, v in so.items():
             if not isinstance(v, dict):
                 errors.append("skill_overrides[%s] must be an object" % k)
+    # skill_context_budget_tokens
+    bgt = cfg.get("skill_context_budget_tokens")
+    if bgt is not None and not (isinstance(bgt, int) and bgt >= 0):
+        errors.append("skill_context_budget_tokens must be a non-negative integer")
+    # max_skills_in_context
+    msc = cfg.get("max_skills_in_context")
+    if msc is not None and not (isinstance(msc, int) and msc >= 0):
+        errors.append("max_skills_in_context must be a non-negative integer")
     return errors
 
 

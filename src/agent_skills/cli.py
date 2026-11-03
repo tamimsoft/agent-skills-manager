@@ -17,6 +17,7 @@ from agent_skills.recommend import recommend
 from agent_skills.links import generate_project_skills_dir, read_marker
 from agent_skills.lock import AdvisoryLock, LockError
 from agent_skills import identity
+from agent_skills.resolution import resolve_resolutions, resolution_summary
 
 
 def _build_parser():
@@ -41,6 +42,7 @@ def _build_parser():
     p = sub.add_parser("init", help="create manifest with empty selection")
     p.add_argument("--name", default=None)
     p.add_argument("--interactive", action="store_true", help="run interactive selection after detection")
+    p.add_argument("--yes", action="store_true", help="accept confirmations")
 
     # select
     p = sub.add_parser("select", help="interactively select skills from recommendations")
@@ -80,6 +82,15 @@ def _build_parser():
     p = sub.add_parser("junie", help="launch Junie with managed skills")
     p.add_argument("--prepare", action="store_true")
     p.add_argument("args", nargs=argparse.REMAINDER)
+
+    # kilo
+    p = sub.add_parser("kilo", help="Kilo subcommands")
+    p.add_argument("--dry-run", action="store_true", dest="dry_run")
+    p.add_argument("--yes", action="store_true")
+    sp = p.add_subparsers(dest="kilo_sub")
+    for name in ("plan", "apply", "validate", "run"):
+        subp = sp.add_parser(name, help="%s Kilo config" % name)
+        subp.add_argument("args", nargs=argparse.REMAINDER)
 
     # opencode
     p = sub.add_parser("opencode", help="OpenCode subcommands")
@@ -165,6 +176,15 @@ def cmd_list(args, cfg):
             records = [r for r in records if r["dir_name"] in sel]
         except ValueError:
             records = []
+            root = None
+
+        if root is not None and m is not None:
+            agents_block = m.get("agents") or {}
+            enabled = [a for a, v in agents_block.items()
+                       if isinstance(v, dict) and v.get("enabled", True)]
+            res = resolve_resolutions(records, [r["dir_name"] for r in records], enabled)
+            print("\nPer-agent resolution:")
+            print(resolution_summary(res))
 
     json_out = getattr(args, "json_out", False) or getattr(args, "json", False)
     if json_out:
@@ -522,6 +542,8 @@ def cmd_validate(args, cfg):
     except Exception as e:
         ok = False
         print("discovery failed: %s" % e)
+        records = []
+        library_root = None
     # manifest
     try:
         root = find_project_root()
@@ -533,12 +555,20 @@ def cmd_validate(args, cfg):
         else:
             # validate selected exist
             sel = selected_ids(man)
-            rec_map = {r["dir_name"]: r for r in records} if "records" in locals() else {}
+            rec_map = {r["dir_name"]: r for r in records} if records else {}
             for sid in sel:
                 if sid not in rec_map and rec_map:
                     ok = False
                     print("manifest references missing skill: %s" % sid)
             print("manifest: %s (selected=%d)" % (manifest_path(root), len(sel)))
+
+            # Per-agent resolution breakdown (§2.2).
+            agents_block = (man.get("agents") or {}) if isinstance(man, dict) else {}
+            enabled = [a for a, v in agents_block.items()
+                       if isinstance(v, dict) and v.get("enabled", True)]
+            res = resolve_resolutions(rec_map.values() if rec_map else [], sel, enabled)
+            print("\nPer-agent resolution:")
+            print(resolution_summary(res))
     except ValueError as e:
         print("no project root: %s" % e)
     return 0 if ok else 3
@@ -611,6 +641,14 @@ def cmd_doctor(args, cfg):
         print("library: %s (%d skills, %d warnings, %d errors)" % (library_root, len(records), len(warnings), len(errors)))
     except Exception as e:
         print("library check failed: %s" % e)
+    # context budget
+    bgt = cfg.get("skill_context_budget_tokens") if isinstance(cfg, dict) else 32768
+    msc = cfg.get("max_skills_in_context") if isinstance(cfg, dict) else 50
+    print("context budget: %d tokens, max %d skills" % (bgt, msc))
+    if bgt and bgt <= 0:
+        print("  warning: skill_context_budget_tokens is 0 (unlimited)")
+    if msc and msc <= 0:
+        print("  warning: max_skills_in_context is 0 (unlimited)")
     return 0
 
 
@@ -652,6 +690,26 @@ def cmd_junie(args, cfg):
     # Phase 5: managed launch. Implement basic.
     from agent_skills.adapters.junie import launch_junie
     return launch_junie(args, cfg)
+
+
+def cmd_kilo(args, cfg):
+    from agent_skills.adapters.kilo import launch_kilo, kilo_plan, kilo_validate
+    sub = getattr(args, "kilo_sub", None)
+    if sub == "plan":
+        rc, msg = kilo_plan(cfg)
+        print(msg)
+        return rc
+    if sub == "apply":
+        return launch_kilo(args, cfg)
+    if sub == "validate":
+        rc, msg = kilo_validate(cfg)
+        print(msg)
+        return rc
+    if sub == "run":
+        args.run_kilo = True
+        return launch_kilo(args, cfg)
+    print("unknown kilo subcommand", file=sys.stderr)
+    return 2
 
 
 def cmd_opencode(args, cfg):
@@ -697,6 +755,8 @@ def main(argv=None):
         return cmd_clean(args, cfg)
     if cmd == "junie":
         return cmd_junie(args, cfg)
+    if cmd == "kilo":
+        return cmd_kilo(args, cfg)
     if cmd == "opencode":
         return cmd_opencode(args, cfg)
     parser.print_help()

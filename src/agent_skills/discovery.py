@@ -15,6 +15,8 @@ from agent_skills.cache import (
     load_cache,
     save_cache,
     is_cache_valid,
+    OVERRIDES_VERSION,
+    CACHE_SCHEMA_VERSION,
 )
 
 
@@ -89,7 +91,7 @@ def discover_skills(library_root, allowed_roots=None, overrides=None, no_cache=F
 
     # Build skill_md path list for cache validation.
     skill_entries = [(name, str(sm)) for name, _, sm in candidates]
-    use_cache = (not no_cache) and cache is not None and is_cache_valid(cache, lr, skill_entries)
+    use_cache = (not no_cache) and cache is not None and is_cache_valid(cache, lr, skill_entries, OVERRIDES_VERSION)
 
     records = []
     warnings = []
@@ -190,6 +192,8 @@ def discover_skills(library_root, allowed_roots=None, overrides=None, no_cache=F
                 }
             save_cache(cache_path, {
                 "library_root": str(Path(library_root).resolve()),
+                "schema_version": CACHE_SCHEMA_VERSION,
+                "overrides_version": OVERRIDES_VERSION,
                 "skills": skills_cache,
             })
         except OSError:

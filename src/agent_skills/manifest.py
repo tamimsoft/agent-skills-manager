@@ -17,7 +17,11 @@ def default_manifest(project_name=None):
         "schema_version": SCHEMA_VERSION,
         "project": {"name": project_name or ""},
         "skills": {"selected": []},
-        "agents": {"junie": {"enabled": True}, "opencode": {"enabled": True}},
+        "agents": {
+            "junie": {"enabled": True},
+            "opencode": {"enabled": True},
+            "kilo": {"enabled": True},
+        },
     }
 
 

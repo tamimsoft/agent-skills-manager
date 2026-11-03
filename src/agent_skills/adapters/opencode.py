@@ -10,6 +10,8 @@ from agent_skills.manifest import load_manifest, selected_ids
 from agent_skills.config import resolve_library_root
 from agent_skills.discovery import discover_skills
 from agent_skills.lock import AdvisoryLock, LockError
+from agent_skills.recommend import filter_skills_for_context
+from agent_skills.detection import detect_technologies
 
 
 def _opencode_exe(cfg):
@@ -68,7 +70,7 @@ def _agent_ids_for_selected(cfg, sel):
         if not aid:
             aid = rec["dir_name"]
         ids.append(aid)
-    return ids, warnings
+    return ids, warnings, rec_map
 
 
 def _apply_rules_to_config(cfg_obj, new_rules, new_policies=None):
@@ -110,23 +112,38 @@ def plan(cfg):
         return 1, "; ".join(errs)
     sel = selected_ids(man)
     try:
-        ids, warnings = _agent_ids_for_selected(cfg, sel)
+        ids, warnings, rec_map = _agent_ids_for_selected(cfg, sel)
     except ValueError as e:
         return 1, str(e)
-    rules = _permission_rules(ids)
+    # Detect technologies for relevance-based budget filtering.
+    techs = detect_technologies(root)
+    # Apply context budget filtering for display.
+    budget_tokens = cfg.get("skill_context_budget_tokens") if isinstance(cfg, dict) else 32768
+    max_skills = cfg.get("max_skills_in_context") if isinstance(cfg, dict) else 50
+    selected_records = [rec_map[sid] for sid in sel if sid in rec_map]
+    filtered_records, skipped, total_tokens, cwarnings = filter_skills_for_context(
+        selected_records, sel, techs, budget_tokens, max_skills,
+    )
+    # Derive display agent_ids from the filtered set so output matches rules.
+    filtered_ids = [(r.get("agent_id") or {}).get("opencode") or r["dir_name"] for r in filtered_records]
+    rules = _permission_rules(filtered_ids)
     oc_path = root / "opencode.json"
     oc_jsonc = root / "opencode.jsonc"
     lines = []
     lines.append("Project root: %s" % root)
     if oc_jsonc.exists():
         lines.append("WARNING: opencode.jsonc exists; manager will not rewrite it. Resolve manually.")
-    lines.append("Selected skills: %s" % ", ".join(sel) if sel else "(none)")
-    lines.append("OpenCode agent_ids: %s" % ", ".join(ids) if ids else "(none)")
-    lines.append("Permission rules to apply:")
+    lines.append("Selected skills: %s" % (", ".join(sel) if sel else "(none)"))
+    lines.append("Context budget: %d tokens, max %d skills" % (budget_tokens, max_skills))
+    lines.append("Estimated context tokens: %d" % total_tokens)
+    if skipped:
+        lines.append("Skills excluded by budget: %d" % skipped)
+    lines.append("OpenCode agent_ids: %s" % (", ".join(filtered_ids) if filtered_ids else "(none)"))
+    lines.append("Permission rules to apply (filtered set):")
     for r in rules:
         lines.append("  %s" % json.dumps(r))
     lines.append("Policy rules to apply (removes denied skills from catalog):")
-    for r in _policy_rules(ids):
+    for r in _policy_rules(filtered_ids):
         lines.append("  %s" % json.dumps(r))
     if oc_path.exists():
         lines.append("Existing opencode.json will be preserved (unrelated settings kept).")
@@ -176,11 +193,21 @@ def apply(cfg, dry_run=False, yes=False):
         return 1, "; ".join(errs) if errs else "manifest missing"
     sel = selected_ids(man)
     try:
-        ids, warnings = _agent_ids_for_selected(cfg, sel)
+        ids, warnings, rec_map = _agent_ids_for_selected(cfg, sel)
     except ValueError as e:
         return 1, str(e)
-    rules = _permission_rules(ids)
-    policies = _policy_rules(ids)
+    # Detect technologies for relevance-based budget filtering.
+    techs = detect_technologies(root)
+    # Apply context budget filtering: only allow rules for skills that fit in context.
+    budget_tokens = cfg.get("skill_context_budget_tokens") if isinstance(cfg, dict) else 32768
+    max_skills = cfg.get("max_skills_in_context") if isinstance(cfg, dict) else 50
+    selected_records = [rec_map[sid] for sid in sel if sid in rec_map]
+    filtered_records, skipped, total_tokens, cwarnings = filter_skills_for_context(
+        selected_records, sel, techs, budget_tokens, max_skills,
+    )
+    filtered_ids = [(r.get("agent_id") or {}).get("opencode") or r["dir_name"] for r in filtered_records]
+    rules = _permission_rules(filtered_ids)
+    policies = _policy_rules(filtered_ids)
 
     existing = {}
     if oc_path.exists():
@@ -192,7 +219,10 @@ def apply(cfg, dry_run=False, yes=False):
     new_config = _apply_rules_to_config(existing, rules, policies)
 
     if dry_run:
-        return 0, "would write %s with %d permission rules" % (oc_path, len(rules))
+        msg = "would write %s with %d permission rules" % (oc_path, len(rules))
+        if skipped:
+            msg += " (%d skills excluded by context budget)" % skipped
+        return 0, msg
 
     # Confirm.
     if not (yes or sys.stdin.isatty()):
@@ -220,16 +250,24 @@ def apply(cfg, dry_run=False, yes=False):
         json.dump({"rules": rules, "policies": policies}, f, indent=2)
         f.write("\n")
 
-    return 0, "applied: %s" % oc_path
+    return 0, "applied: %s (%d permission rules%s)" % (
+        oc_path, len(rules), " (%d skills excluded by context budget)" % skipped if skipped else "")
 
 
 def run(cfg, extra=None):
     extra = extra or []
+    # Apply permissions implicitly so managed launch restricts skills in one command.
+    rc, msg = apply(cfg, dry_run=False, yes=True)
+    if rc != 0:
+        print(msg, file=sys.stderr)
+        return rc
     rc, msg = validate(cfg)
     if rc != 0:
         print(msg, file=sys.stderr)
         return rc
     argv = [_opencode_exe(cfg), "run"] + (extra or [])
+    sys.stdout.flush()
+    sys.stderr.flush()
     os.execvp(argv[0], argv)
     return 0
 

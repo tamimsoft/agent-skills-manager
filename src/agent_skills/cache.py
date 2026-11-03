@@ -1,15 +1,32 @@
-"""Mtime-keyed discovery cache."""
+"""Discovery cache with fuller invalidation key (guideline v4 §5.7 / R-07).
 
+Cache key per skill includes:
+  - resolved real source path
+  - SKILL.md mtime
+  - SKILL.md size
+  - fast content fingerprint (md5 of first 64 KB)
+
+Cache-level keys:
+  - resolved real path of library root
+  - manager/parser schema version
+  - user-authored metadata override version (skill_overrides)
+  - presence/absence of each previously-seen skill directory
+
+--no-cache bypasses it for diagnostics.
+"""
+
+import hashlib
 import json
 import os
 from pathlib import Path
 
 CACHE_FILENAME = "discovery-cache.json"
+CACHE_SCHEMA_VERSION = 1
+OVERRIDES_VERSION = 1
 
 
 def cache_path(generated_root=None):
     if generated_root is None:
-        # Use a cache dir under home.
         base = Path(os.environ.get("AGENT_SKILLS_CACHE", "")).expanduser() if os.environ.get("AGENT_SKILLS_CACHE") else None
         if base:
             return base / CACHE_FILENAME
@@ -37,31 +54,59 @@ def save_cache(path, data):
     os.replace(tmp, p)
 
 
-def cache_key_for_skill(skill_md_path):
+def content_hash(skill_md_path, limit=65536):
+    """Fast content fingerprint: md5 of the first `limit` bytes of SKILL.md."""
     try:
-        st = Path(skill_md_path).stat()
-        return (int(st.st_mtime), int(st.st_size))
+        h = hashlib.md5()
+        with open(skill_md_path, "rb") as f:
+            h.update(f.read(limit))
+        return h.hexdigest()
     except OSError:
         return None
 
 
-def is_cache_valid(cache, library_root, skill_entries):
-    """skill_entries: list of (dir_name, skill_md_path)."""
+def cache_key_for_skill(skill_md_path):
+    """Return a list key: [real_path, mtime, size, content_hash]."""
+    try:
+        p = Path(skill_md_path)
+        st = p.stat()
+        return [
+            str(p.resolve()),
+            int(st.st_mtime),
+            int(st.st_size),
+            content_hash(p),
+        ]
+    except OSError:
+        return None
+
+
+def is_cache_valid(cache, library_root, skill_entries, overrides_version=OVERRIDES_VERSION):
+    """skill_entries: list of (dir_name, skill_md_path).
+
+    Returns True only if every cache-level and per-skill key component matches.
+    """
     if not isinstance(cache, dict):
         return False
     if cache.get("library_root") != str(Path(library_root).resolve()):
         return False
+    if cache.get("schema_version") != CACHE_SCHEMA_VERSION:
+        return False
+    if cache.get("overrides_version") != overrides_version:
+        return False
     cached = cache.get("skills")
     if not isinstance(cached, dict):
+        return False
+    current_names = set(d for d, _ in skill_entries)
+    # Presence/absence: renamed or removed skills must invalidate.
+    if set(cached.keys()) != current_names:
         return False
     for dn, p in skill_entries:
         key = cache_key_for_skill(p)
         if key is None:
             return False
         ck = cached.get(dn)
-        if not isinstance(ck, dict) or tuple(ck.get("key", ())) != tuple(key):
+        if not isinstance(ck, dict):
             return False
-    # Ensure no stale extra entries.
-    if set(cached.keys()) != set(d for d, _ in skill_entries):
-        return False
+        if ck.get("key") != key:
+            return False
     return True

@@ -5,3 +5,19 @@ __pycache__/
 dist/
 build/
 .pytest_cache/
+
+# Local-only AI and agent configuration
+/AGENTS.md
+/AGENTS.override.md
+/CLAUDE.md
+/GEMINI.md
+/KILO.md
+/.aiignore
+/.agents/
+/.junie/
+/.opencode/
+/.claude/
+/.kilo/
+/kilo.jsonc
+/opencode.json
+/opencode.jsonc
