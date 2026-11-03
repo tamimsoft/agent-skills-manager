@@ -57,6 +57,34 @@ Config fields live in `~/.config/agent-skills/config.json` (schema v1). Override
 
 Skill IDs (folder names) must match `^[A-Za-z0-9][A-Za-z0-9._-]*$`. Names with spaces, slashes, or leading dots are discovered but flagged as unsafe and cannot be selected or added to the manifest.
 
+## How it works
+
+```
+┌─────────────────┐     ┌──────────────────────────┐     ┌─────────────────────┐
+│   Library root  │     │   Project manifest       │     │   Generated skills    │
+│ ~/.agents/skills│────▶│  .agents/skills.json     │────▶│   dir (symlinks)      │
+│  SKILL.md files │     │   (selected skill IDs)   │     │   + managed marker    │
+└─────────────────┘     └──────────────────────────┘     └─────────────────────┘
+                                                        │
+                    ┌───────────────────────────────────┼──────────────────────┐
+                    ▼                                   ▼                      ▼
+            ┌─────────────┐                      ┌───────────┐         ┌──────────┐
+            │   OpenCode  │                      │   Junie   │         │   Kilo   │
+            │   (apply)   │                      │   launch  │         │  (apply) │
+            │ permissions │                      │ --skill-location   permission rules
+            │   + policies│                      │   generated dir    in kilo.json
+            └─────────────┘                      └───────────┘         └──────────┘
+```
+
+- **Discovery**: `discover_skills()` scans the library root, parses SKILL.md frontmatter, validates safe IDs, allow-lists symlinks, and caches results.
+- **Manifest**: `.agents/skills.json` lists selected skill IDs; `init` detects technologies and recommends skills; `generate_agents_md()` creates `AGENTS.md` (safe merge — never overwrites).
+- **Sync/build**: `sync` (and managed launches) apply the context budget (tech-match scoring + token/max-skill caps), then atomically build-then-swap the generated skills dir via `AdvisoryLock`.
+- **Adapter behavior**:
+  - **OpenCode** — writes permission rules + `skill.use` policies into `opencode.json` plus an `opencode-owned-rules.json` sidecar; user-authored rules are preserved (tagged `source: agent-skills-manager`).
+  - **Junie** — launches with `--skill-default-locations=false --skill-location=<generated dir>`; additive library loading remains for unmanaged Junie.
+  - **Kilo** — additive (no exclusive skill-path mechanism); writes permission rules into `.kilo/kilo.json` and generates `.kilo/skills/` with marker.
+- **Context budget**: Only `selected` skills are eligible; they are scored (+5 tech match, +1 keyword overlap, +min(3) instruction overlap), sorted by score then dir_name, and truncated to `skill_context_budget_tokens` / `max_skills_in_context`. Excluded skills are reported as warnings; manifest selection is unchanged.
+
 ## Tests
 
 ```bash
