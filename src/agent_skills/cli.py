@@ -357,9 +357,15 @@ def _curses_select(recs, initial_chosen=None):
                             if i == local_idx:
                                 pass  # already in reverse-video pair 1
                             else:
-                                stdscr.attron(curses.color_pair(6))
+                                if pct >= 10:
+                                    stdscr.attron(curses.color_pair(3))
+                                elif pct >= 7:
+                                    stdscr.attron(curses.color_pair(6))
                                 stdscr.addstr(content_top + i, score_x, score_str[: max(1, w - score_x)])
-                                stdscr.attroff(curses.color_pair(6))
+                                if pct >= 10:
+                                    stdscr.attroff(curses.color_pair(3))
+                                elif pct >= 7:
+                                    stdscr.attroff(curses.color_pair(6))
                         if i == local_idx:
                             stdscr.attroff(curses.color_pair(1) | curses.A_BOLD)
                         elif name in chosen:
