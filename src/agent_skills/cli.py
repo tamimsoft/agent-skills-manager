@@ -75,13 +75,14 @@ def _build_parser():
     sub.add_parser("validate", help="validate config, manifest, library")
 
     # sync
-    sub.add_parser("sync", help="regenerate generated state from manifest")
+    p = sub.add_parser("sync", help="regenerate generated state from manifest")
+    p.add_argument("--dry-run", action="store_true", dest="dry_run")
 
     # doctor
     sub.add_parser("doctor", help="environment checks")
 
     # clean
-    sub.add_parser("clean", help="remove orphaned generated directories")
+    p = sub.add_parser("clean", help="remove orphaned generated directories")
     p.add_argument("--dry-run", action="store_true", dest="dry_run")
 
     # junie
@@ -96,6 +97,7 @@ def _build_parser():
     sp = p.add_subparsers(dest="kilo_sub")
     for name in ("plan", "apply", "validate", "run"):
         subp = sp.add_parser(name, help="%s Kilo config" % name)
+        subp.add_argument("--dry-run", action="store_true", dest="dry_run")
         subp.add_argument("args", nargs=argparse.REMAINDER)
 
     # opencode
@@ -103,6 +105,7 @@ def _build_parser():
     sp = p.add_subparsers(dest="oc_sub")
     for name in ("plan", "apply", "validate", "run"):
         subp = sp.add_parser(name, help="%s OpenCode config" % name)
+        subp.add_argument("--dry-run", action="store_true", dest="dry_run")
         subp.add_argument("args", nargs=argparse.REMAINDER)
 
     return parser
