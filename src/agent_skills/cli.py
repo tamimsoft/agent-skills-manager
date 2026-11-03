@@ -336,7 +336,12 @@ def interactive_select(records, techs, limit=20, show_all=False, initial_selecte
 
     if _curses_available() and sys.stdin.isatty() and sys.stdout.isatty():
         try:
-            return _curses_select(recs, initial_chosen=set(initial_selected or set()))
+            # Search bar operates on ALL discovered skills, not just
+            # recommendations, so the user can find any skill by name.
+            all_recs = [
+                {"record": r, "score": 0, "reasons": ["all skills"]} for r in records
+            ]
+            return _curses_select(all_recs, initial_chosen=set(initial_selected or set()))
         except Exception:
             pass
 
