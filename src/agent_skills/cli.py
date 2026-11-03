@@ -256,8 +256,8 @@ def _curses_select(recs, initial_chosen=None):
         try:
             curses.start_color()
             curses.use_default_colors()
-            # Pair 1: selected row (reverse video)
-            curses.init_pair(1, curses.COLOR_WHITE, curses.COLOR_BLUE)
+            # Pair 1: selected row (hover) — black text on cyan background
+            curses.init_pair(1, curses.COLOR_BLACK, curses.COLOR_CYAN)
             # Pair 2: header / title
             curses.init_pair(2, curses.COLOR_CYAN, -1)
             # Pair 3: check mark / selected skill
@@ -349,7 +349,7 @@ def _curses_select(recs, initial_chosen=None):
                     left_disp = left[:max_left]
                     try:
                         if i == local_idx:
-                            stdscr.attron(curses.color_pair(1) | curses.A_BOLD)
+                            stdscr.attron(curses.color_pair(1))
                         elif name in chosen:
                             stdscr.attron(curses.color_pair(3))
                         stdscr.addstr(content_top + i, 0, left_disp[: max(1, w - 1)])
@@ -367,7 +367,7 @@ def _curses_select(recs, initial_chosen=None):
                                 elif pct >= 7:
                                     stdscr.attroff(curses.color_pair(6))
                         if i == local_idx:
-                            stdscr.attroff(curses.color_pair(1) | curses.A_BOLD)
+                            stdscr.attroff(curses.color_pair(1))
                         elif name in chosen:
                             stdscr.attroff(curses.color_pair(3))
                     except curses.error:
