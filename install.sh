@@ -27,5 +27,5 @@ exec python3 -m agent_skills "\$@"
 EOF
 chmod +x "${INSTALL_BIN}/agent-skills"
 
-echo "Installed agent-skills to ${INSTALL_BIN}/agent-skills"
-echo "Ensure ${INSTALL_BIN} is on PATH (doctor checks this)."
+echo "Installation complete: agent-skills installed to ${INSTALL_BIN}/agent-skills"
+echo "Ensure ${INSTALL_BIN} is on PATH (run 'agent-skills doctor' to verify)."
