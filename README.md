@@ -12,6 +12,38 @@ Installs, discovers, validates, and syncs agent skills (SKILL.md frontmatter fil
 
 Installs the `agent-skills` launcher to `~/.local/bin/agent-skills`, copies the package to `~/.local/lib/agent-skills`, and sets PYTHONPATH in the wrapper. Ensure `~/.local/bin` is on PATH.
 
+## Getting started with a new project
+
+```bash
+# 1. Enter your project root (must contain or be under a git repo).
+cd /path/to/your-project
+
+# 2. Create the manifest — detects technologies and recommends skills.
+agent-skills init
+
+# 3. Select skills interactively (requires TTY or --yes).
+agent-skills select
+
+# 4. Or add specific skills by dir_name.
+agent-skills add flutter-tamim code-reviewer
+
+# 5. Validate the manifest against the library.
+agent-skills validate
+
+# 6. Generate the project skills directory (respects context budget).
+agent-skills sync
+
+# 7. Launch an agent with managed skills.
+agent-skills junie --prepare
+agent-skills opencode plan
+agent-skills kilo plan
+```
+
+**First-time behavior:**
+- `init` creates `.agents/skills.json` with an empty `selected` array and writes `AGENTS.md` (combining the global rules template + detected technology guidance). An existing `AGENTS.md` is **never overwritten**.
+- Detected technologies are printed; recommended skills are shown but **not auto-selected**.
+- Use `--yes` to skip confirmations in non-TTY environments (CI, scripts).
+
 ## Usage
 
 ```bash
