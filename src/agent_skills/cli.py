@@ -266,6 +266,8 @@ def _curses_select(recs, initial_chosen=None):
             curses.init_pair(4, curses.COLOR_WHITE, -1)
             # Pair 5: footer / hints
             curses.init_pair(5, curses.COLOR_MAGENTA, -1)
+            # Pair 6: score percent (matching percentage) — yellow
+            curses.init_pair(6, curses.COLOR_YELLOW, -1)
         except curses.error:
             pass
 
@@ -303,9 +305,12 @@ def _curses_select(recs, initial_chosen=None):
             # Search line — typed text highlighted.
             try:
                 stdscr.attron(curses.color_pair(4) | curses.A_BOLD)
-                stdscr.addstr(1, 1, "Search: %s" % search[0])
+                stdscr.addstr(1, 1, "Search: ")
                 stdscr.attroff(curses.color_pair(4) | curses.A_BOLD)
-                stdscr.addstr(1, 12 + len(search[0]), "  (type to filter, Backspace clear)")
+                stdscr.attron(curses.color_pair(4) | curses.A_BOLD | curses.A_STANDOUT)
+                stdscr.addstr(search[0])
+                stdscr.attroff(curses.color_pair(4) | curses.A_BOLD | curses.A_STANDOUT)
+                stdscr.addstr("  (type to filter, Backspace clear)")
             except curses.error:
                 pass
 
@@ -345,12 +350,16 @@ def _curses_select(recs, initial_chosen=None):
                     try:
                         if i == local_idx:
                             stdscr.attron(curses.color_pair(1) | curses.A_BOLD)
-                        else:
-                            if name in chosen:
-                                stdscr.attron(curses.color_pair(3))
+                        elif name in chosen:
+                            stdscr.attron(curses.color_pair(3))
                         stdscr.addstr(content_top + i, 0, left_disp[: max(1, w - 1)])
                         if score_x > len(left_disp):
-                            stdscr.addstr(content_top + i, score_x, score_str[: max(1, w - score_x)])
+                            if i == local_idx:
+                                pass  # already in reverse-video pair 1
+                            else:
+                                stdscr.attron(curses.color_pair(6))
+                                stdscr.addstr(content_top + i, score_x, score_str[: max(1, w - score_x)])
+                                stdscr.attroff(curses.color_pair(6))
                         if i == local_idx:
                             stdscr.attroff(curses.color_pair(1) | curses.A_BOLD)
                         elif name in chosen:
