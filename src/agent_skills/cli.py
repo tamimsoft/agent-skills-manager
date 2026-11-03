@@ -241,7 +241,25 @@ def _curses_select(recs, initial_chosen=None):
     def page_count(filtered):
         return max(1, (len(filtered) + PAGE_SIZE - 1) // PAGE_SIZE)
 
+    def _init_colors(stdscr):
+        try:
+            curses.start_color()
+            curses.use_default_colors()
+            # Pair 1: selected row (reverse video)
+            curses.init_pair(1, curses.COLOR_WHITE, curses.COLOR_BLUE)
+            # Pair 2: header / title
+            curses.init_pair(2, curses.COLOR_CYAN, -1)
+            # Pair 3: check mark / selected skill
+            curses.init_pair(3, curses.COLOR_GREEN, -1)
+            # Pair 4: search bar
+            curses.init_pair(4, curses.COLOR_YELLOW, -1)
+            # Pair 5: footer / hints
+            curses.init_pair(5, curses.COLOR_MAGENTA, -1)
+        except curses.error:
+            pass
+
     def draw(stdscr):
+        _init_colors(stdscr)
         curses.curs_set(0)
         stdscr.keypad(True)
         while True:
@@ -259,28 +277,84 @@ def _curses_select(recs, initial_chosen=None):
 
             stdscr.clear()
             h, w = stdscr.getmaxyx()
+
+            # Title bar.
             try:
-                stdscr.addstr(0, 0, "Search: %s  |  Page %d/%d  (%d skills)"
-                              % (search[0], page[0] + 1, page_count(filtered), len(filtered)))
+                title = " Agent Skill Selector "
+                pad = max(0, (w - len(title)) // 2)
+                stdscr.attron(curses.color_pair(2) | curses.A_BOLD)
+                stdscr.addstr(0, pad, title[: max(1, w - 1)])
+                stdscr.attroff(curses.color_pair(2) | curses.A_BOLD)
             except curses.error:
                 pass
+
+            # Search line.
             try:
-                stdscr.addstr(1, 0, "Up/Down move, PgUp/PgDn page, Space toggle, Enter confirm, q cancel")
+                stdscr.attron(curses.color_pair(4))
+                stdscr.addstr(1, 1, "Search: %s" % search[0])
+                stdscr.attroff(curses.color_pair(4))
+                stdscr.addstr(1, 12 + len(search[0]), "  (type to filter, Backspace clear)")
             except curses.error:
                 pass
-            for i, r in enumerate(page_items):
-                name = r["record"]["dir_name"]
-                mark = "x" if name in chosen else " "
-                line = "  [%s] %s (score=%d)" % (mark, name, r["score"])
+
+            # Stats line: page + selected count.
+            try:
+                stats = "Page %d/%d  (%d skills, %d selected)" % (
+                    page[0] + 1, page_count(filtered), len(filtered), len(chosen))
+                stdscr.addstr(1, max(0, w - len(stats) - 1), stats)
+            except curses.error:
+                pass
+
+            # Content area with border.
+            content_top = 3
+            try:
+                stdscr.attron(curses.A_DIM)
+                stdscr.addstr(content_top - 1, 0, "─" * max(1, w - 1))
+                stdscr.attroff(curses.A_DIM)
+            except curses.error:
+                pass
+
+            if not page_items:
                 try:
-                    if i == local_idx:
-                        stdscr.attron(curses.A_REVERSE)
-                        stdscr.addstr(i + 3, 0, line[: max(1, w - 1)])
-                        stdscr.attroff(curses.A_REVERSE)
-                    else:
-                        stdscr.addstr(i + 3, 0, line[: max(1, w - 1)])
+                    stdscr.addstr(content_top, 1, "No skills match your search.")
                 except curses.error:
                     pass
+            else:
+                for i, r in enumerate(page_items):
+                    name = r["record"]["dir_name"]
+                    mark = "x" if name in chosen else " "
+                    line = "  [%s] %s (score=%d)" % (mark, name, r["score"])
+                    try:
+                        if i == local_idx:
+                            stdscr.attron(curses.color_pair(1) | curses.A_BOLD)
+                            stdscr.addstr(content_top + i, 0, line[: max(1, w - 1)])
+                            stdscr.attroff(curses.color_pair(1) | curses.A_BOLD)
+                        else:
+                            if name in chosen:
+                                stdscr.attron(curses.color_pair(3))
+                            stdscr.addstr(content_top + i, 0, line[: max(1, w - 1)])
+                            if name in chosen:
+                                stdscr.attroff(curses.color_pair(3))
+                    except curses.error:
+                        pass
+
+            # Scroll indicator.
+            try:
+                if page_count(filtered) > 1:
+                    scroll = "▼" if page[0] < page_count(filtered) - 1 else ""
+                    stdscr.addstr(h - 2, max(0, w - 4), scroll)
+            except curses.error:
+                pass
+
+            # Footer / key hints.
+            try:
+                footer = " ↑↓ move  PgUp/PgDn page  Space toggle  Enter confirm  q cancel"
+                stdscr.attron(curses.color_pair(5) | curses.A_DIM)
+                stdscr.addstr(h - 1, 1, footer[: max(1, w - 2)])
+                stdscr.attroff(curses.color_pair(5) | curses.A_DIM)
+            except curses.error:
+                pass
+
             stdscr.refresh()
             key = stdscr.getch()
             if key == curses.KEY_UP:
