@@ -268,6 +268,8 @@ def _curses_select(recs, initial_chosen=None):
             curses.init_pair(5, curses.COLOR_MAGENTA, -1)
             # Pair 6: score percent (matching percentage) — yellow
             curses.init_pair(6, curses.COLOR_YELLOW, -1)
+            # Pair 7: secondary text (stats, borders, empty state) — cyan dim
+            curses.init_pair(7, curses.COLOR_CYAN, -1)
         except curses.error:
             pass
 
@@ -318,22 +320,29 @@ def _curses_select(recs, initial_chosen=None):
             try:
                 stats = "Page %d/%d  (%d skills, %d selected)" % (
                     page[0] + 1, page_count(filtered), len(filtered), len(chosen))
+                stdscr.attron(curses.color_pair(7) | curses.A_DIM)
                 stdscr.addstr(1, max(0, w - len(stats) - 1), stats)
+                stdscr.attroff(curses.color_pair(7) | curses.A_DIM)
             except curses.error:
                 pass
 
-            # Content area with border.
+            # Content area border.
             content_top = 3
             try:
-                stdscr.attron(curses.A_DIM)
+                stdscr.attron(curses.color_pair(7) | curses.A_DIM)
                 stdscr.addstr(content_top - 1, 0, "─" * max(1, w - 1))
-                stdscr.attroff(curses.A_DIM)
+                stdscr.attroff(curses.color_pair(7) | curses.A_DIM)
+                # Column hints.
+                hint = "  [mark]  serial. name                   score"
+                stdscr.addstr(content_top - 1, 1, hint[: max(1, w - 2)])
             except curses.error:
                 pass
 
             if not page_items:
                 try:
+                    stdscr.attron(curses.color_pair(7) | curses.A_DIM)
                     stdscr.addstr(content_top, 1, "No skills match your search.")
+                    stdscr.attroff(curses.color_pair(7) | curses.A_DIM)
                 except curses.error:
                     pass
             else:
@@ -385,7 +394,9 @@ def _curses_select(recs, initial_chosen=None):
             try:
                 if page_count(filtered) > 1:
                     scroll = "▼" if page[0] < page_count(filtered) - 1 else ""
+                    stdscr.attron(curses.color_pair(2))
                     stdscr.addstr(h - 2, max(0, w - 4), scroll)
+                    stdscr.attroff(curses.color_pair(2))
             except curses.error:
                 pass
 
