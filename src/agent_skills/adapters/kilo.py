@@ -184,6 +184,11 @@ def launch_kilo(args, cfg):
 
     # Detect technologies for relevance-based budget filtering.
     techs = detect_technologies(root)
+    # Regenerate project AGENTS.md (force overwrite: launch refreshes it).
+    from agent_skills.cli import generate_agents_md
+    wrote_agents, msg_agents, agents_md_content = generate_agents_md(root, techs, cfg, force=True)
+    if msg_agents:
+        print("notice: %s" % msg_agents)
     # Context budget filtering: only symlink skills that fit in context.
     filtered_records, skipped, _, cwarnings = apply_context_budget(
         selected_records, sel, techs, cfg,
@@ -210,6 +215,7 @@ def launch_kilo(args, cfg):
                 build_entry_fn=build_skill_entry,
                 tmp_prefix=".kilo-skills-tmp-",
                 marker_filename=MARKER_FILENAME_KILO,
+                agents_md_content=agents_md_content,
             )
     except LockError as e:
         print("error: %s" % e, file=sys.stderr)
@@ -293,6 +299,12 @@ def kilo_plan(cfg):
     lines.append(ADDITIVE_NOTICE)
     lines.append("\nPer-agent resolution (kilo):")
     lines.append(resolution_summary(res))
+    # Regenerate project AGENTS.md (plan refreshes it).
+    techs = detect_technologies(root)
+    from agent_skills.cli import generate_agents_md
+    wrote_agents, msg_agents, _content = generate_agents_md(root, techs, cfg, force=True)
+    if msg_agents:
+        lines.append("notice: %s" % msg_agents)
     return 0, "\n".join(lines)
 
 

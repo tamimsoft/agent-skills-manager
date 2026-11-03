@@ -127,6 +127,12 @@ def plan(cfg):
         return 1, str(e)
     # Detect technologies for relevance-based budget filtering.
     techs = detect_technologies(root)
+    lines = []
+    # Regenerate project AGENTS.md (plan refreshes it).
+    from agent_skills.cli import generate_agents_md
+    wrote_agents, msg_agents, _content = generate_agents_md(root, techs, cfg, force=True)
+    if msg_agents:
+        lines.append("notice: %s" % msg_agents)
     # Apply context budget filtering for display.
     selected_records = [rec_map[sid] for sid in sel if sid in rec_map]
     filtered_records, skipped, total_tokens, _ = apply_context_budget(
@@ -137,7 +143,6 @@ def plan(cfg):
     rules = _permission_rules(filtered_ids)
     oc_path = root / "opencode.json"
     oc_jsonc = root / "opencode.jsonc"
-    lines = []
     lines.append("Project root: %s" % root)
     if oc_jsonc.exists():
         lines.append("WARNING: opencode.jsonc exists; manager will not rewrite it. Resolve manually.")
@@ -208,6 +213,11 @@ def apply(cfg, dry_run=False, yes=False):
         return 1, str(e)
     # Detect technologies for relevance-based budget filtering.
     techs = detect_technologies(root)
+    # Regenerate project AGENTS.md (apply refreshes it).
+    from agent_skills.cli import generate_agents_md
+    wrote_agents, msg_agents, _content = generate_agents_md(root, techs, cfg, force=True)
+    if msg_agents:
+        print("notice: %s" % msg_agents)
     # Apply context budget filtering: only allow rules for skills that fit in context.
     selected_records = [rec_map[sid] for sid in sel if sid in rec_map]
     filtered_records, skipped, _, _ = apply_context_budget(

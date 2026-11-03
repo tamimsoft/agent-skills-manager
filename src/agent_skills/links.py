@@ -41,10 +41,11 @@ def _make_symlink(src_real, dest):
     os.symlink(src_real, dest)
 
 
-def generate_project_skills_dir(generated_dir, selected_records, library_root, allowed_roots=None, manager_version="0.1.0", schema_version=1, project_key=""):
+def generate_project_skills_dir(generated_dir, selected_records, library_root, allowed_roots=None, manager_version="0.1.0", schema_version=1, project_key="", agents_md_content=None):
     """Atomically (re)build generated_dir with symlinks to selected skills.
 
     selected_records: list of skill record dicts.
+    agents_md_content: optional AGENTS.md text to write into the generated dir.
     Returns path to generated_dir.
     """
     generated_dir = Path(generated_dir)
@@ -97,10 +98,19 @@ def generate_project_skills_dir(generated_dir, selected_records, library_root, a
             json.dump(owned_rules, f, indent=2)
             f.write("\n")
 
+        # Write AGENTS.md into the generated dir so agents see global rules in context.
+        if agents_md_content is not None:
+            with (tmp / "AGENTS.md").open("w", encoding="utf-8") as f:
+                f.write(agents_md_content)
+                f.write("\n")
+            managed_entries.append("AGENTS.md")
+
         # Verify all symlinks resolve.
         for name in managed_entries:
             link = tmp / name
             if not link.is_symlink():
+                if link.is_file():
+                    continue  # AGENTS.md is a regular file, not a symlink
                 raise RuntimeError("expected symlink: %s" % link)
             if not link.exists():
                 raise RuntimeError("broken symlink: %s" % link)

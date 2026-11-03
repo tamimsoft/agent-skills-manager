@@ -173,7 +173,8 @@ def apply_context_budget(selected_records, sel, techs, cfg):
 
 def build_skills_dir_atomic(parent, dest_dir, records, agent_name, key,
                             build_entry_fn, tmp_prefix=".gen-tmp-",
-                            marker_filename=None, extra_marker_fields=None):
+                            marker_filename=None, extra_marker_fields=None,
+                            agents_md_content=None):
     """Build-then-swap crash recovery pattern (§5.5).
 
     Builds skill entries in a temp sibling directory under `parent`, writes
@@ -208,16 +209,6 @@ def build_skills_dir_atomic(parent, dest_dir, records, agent_name, key,
                     managed_entries.append("%s/%s" % (rec["dir_name"], l))
             else:
                 managed_entries.append(rec["dir_name"])
-            if linked:
-                for l in linked:
-                    managed_entries.append("%s/%s" % (rec["dir_name"], l))
-            else:
-                managed_entries.append(rec["dir_name"])
-            if linked:
-                for l in linked:
-                    managed_entries.append("%s/%s" % (rec["dir_name"], l))
-            else:
-                managed_entries.append(rec["dir_name"])
 
         marker = {
             "manager_version": "0.1.0",
@@ -233,10 +224,19 @@ def build_skills_dir_atomic(parent, dest_dir, records, agent_name, key,
             json.dump(marker, f, indent=2)
             f.write("\n")
 
+        # Write AGENTS.md into the generated dir so agents see global rules in context.
+        if agents_md_content is not None:
+            with (tmp / "AGENTS.md").open("w", encoding="utf-8") as f:
+                f.write(agents_md_content)
+                f.write("\n")
+            managed_entries.append("AGENTS.md")
+
         # Verify symlinks resolve.
         for name in managed_entries:
             link = tmp / name
             if not link.exists():
+                if link.is_file():
+                    continue  # AGENTS.md is a regular file, not a symlink
                 raise RuntimeError("broken generated link: %s" % link)
 
         # Build-then-swap: rename old aside, move tmp into place, remove old.

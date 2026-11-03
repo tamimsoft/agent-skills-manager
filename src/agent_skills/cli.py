@@ -631,16 +631,21 @@ def _tech_section(tech):
     return "### %s\nDetected via: %s\n" % (name, evidence)
 
 
-def generate_agents_md(root, techs, cfg):
+def generate_agents_md(root, techs, cfg, force=False, write=True):
     """Generate project AGENTS.md from the global base template + tech sections.
 
-    Never overwrites an existing AGENTS.md. If one exists, returns wrote=False
-    with a message so the caller can offer a safe merge.
-    Returns (wrote, message).
+    By default never overwrites an existing AGENTS.md (safe merge for init).
+    With force=True, overwrites (used by sync and managed launches).
+    With write=False, computes content without writing to disk (used by validate).
+    Returns (wrote, message, content) where content is the generated text.
     """
     agents_md = root / "AGENTS.md"
-    if agents_md.exists():
-        return False, "AGENTS.md already exists at %s; not overwritten. Merge manually or delete and re-run init." % agents_md
+    if agents_md.exists() and not force:
+        try:
+            existing = agents_md.read_text(encoding="utf-8")
+        except OSError:
+            existing = None
+        return False, "AGENTS.md already exists at %s; not overwritten. Merge manually or delete and re-run init." % agents_md, existing
 
     global_tpl = ensure_global_template()
     parts = []
@@ -660,11 +665,14 @@ def generate_agents_md(root, techs, cfg):
     parts.append("\n## Agent skills\nSee .agents/skills.json for the selected skill set.\n")
 
     content = "\n".join(parts)
-    try:
-        agents_md.write_text(content, encoding="utf-8")
-        return True, "Generated AGENTS.md at %s" % agents_md
-    except OSError as e:
-        return False, "Failed to write AGENTS.md: %s" % e
+    if write:
+        try:
+            agents_md.write_text(content, encoding="utf-8")
+            return True, "Generated AGENTS.md at %s" % agents_md, content
+        except OSError as e:
+            return False, "Failed to write AGENTS.md: %s" % e, None
+    else:
+        return False, "AGENTS.md content computed (not written).", content
 
 
 def cmd_init(args, cfg):
@@ -706,7 +714,7 @@ def cmd_init(args, cfg):
             if _confirm("Create manifest with selection %s?" % ", ".join(chosen), getattr(args, "yes", False)):
                 save_manifest(root, man)
                 print("Created %s" % mp)
-                wrote, msg = generate_agents_md(root, techs, cfg)
+                wrote, msg, _content = generate_agents_md(root, techs, cfg)
                 print(msg)
                 return 0
     if not mp.exists():
@@ -717,9 +725,9 @@ def cmd_init(args, cfg):
             return 0
         save_manifest(root, man)
         print("Created %s" % mp)
-        wrote, msg = generate_agents_md(root, techs, cfg)
+        wrote, msg, _content = generate_agents_md(root, techs, cfg)
         print(msg)
-    wrote, msg = generate_agents_md(root, techs, cfg)
+    wrote, msg, _content = generate_agents_md(root, techs, cfg)
     print(msg)
     return 0
 
@@ -869,6 +877,22 @@ def cmd_validate(args, cfg):
             res = resolve_resolutions(rec_map.values() if rec_map else [], sel, enabled)
             print("\nPer-agent resolution:")
             print(resolution_summary(res))
+
+            # AGENTS.md hard enforcement: project AGENTS.md must exist and be current.
+            agents_md_path = root / "AGENTS.md"
+            if not agents_md_path.is_file():
+                ok = False
+                print("AGENTS.md missing: run 'agent-skills init' or 'agent-skills sync' to generate.")
+            else:
+                techs = detect_technologies(root)
+                wrote, msg, expected = generate_agents_md(root, techs, cfg, force=False, write=False)
+                try:
+                    existing = agents_md_path.read_text(encoding="utf-8")
+                except OSError:
+                    existing = None
+                if expected is not None and existing != expected:
+                    ok = False
+                    print("AGENTS.md stale: regenerate with 'agent-skills sync'.")
     except ValueError as e:
         print("no project root: %s" % e)
     return 0 if ok else 3
@@ -896,6 +920,10 @@ def cmd_sync(args, cfg):
             return 1
     # Detect technologies for relevance-based budget filtering.
     techs = detect_technologies(root)
+    # Regenerate project AGENTS.md (force overwrite: sync refreshes it).
+    wrote_agents, msg_agents, agents_md_content = generate_agents_md(root, techs, cfg, force=True)
+    if msg_agents:
+        print("notice: %s" % msg_agents)
     # Context budget filtering: only generate skills that fit in context.
     filtered_records, skipped, total_tokens, cwarnings = filter_skills_for_context(
         selected_records, sel, techs,
@@ -915,6 +943,8 @@ def cmd_sync(args, cfg):
     gen_dir = Path(generated_root) / key
     if getattr(args, "dry_run", False) or getattr(args, "dry-run", False):
         print("would generate: %s with %d skills" % (gen_dir, len(filtered_records)))
+        if agents_md_content:
+            print("would write AGENTS.md into generated dir")
         return 0
     lock_path = Path(generated_root) / ".lock"
     try:
@@ -923,6 +953,7 @@ def cmd_sync(args, cfg):
                 gen_dir, filtered_records, library_root,
                 allowed_roots=cfg.get("allowed_roots", []) if isinstance(cfg, dict) else [],
                 project_key=key,
+                agents_md_content=agents_md_content,
             )
     except LockError as e:
         print("error: %s" % e, file=sys.stderr)

@@ -100,6 +100,11 @@ def launch_junie(args, cfg):
 
     # Apply context budget filtering: only symlink skills that fit in context.
     techs = detect_technologies(root)
+    # Regenerate project AGENTS.md (force overwrite: launch refreshes it).
+    from agent_skills.cli import generate_agents_md
+    wrote_agents, msg_agents, agents_md_content = generate_agents_md(root, techs, cfg, force=True)
+    if msg_agents:
+        print("notice: %s" % msg_agents)
     filtered_records, skipped, _, cwarnings = apply_context_budget(
         selected_records, sel, techs, cfg,
     )
@@ -122,6 +127,7 @@ def launch_junie(args, cfg):
                 build_entry_fn=build_skill_entry,
                 tmp_prefix=".junie-skills-tmp-",
                 marker_filename=MARKER_FILENAME,
+                agents_md_content=agents_md_content,
             )
     except LockError as e:
         print("error: %s" % e, file=sys.stderr)
