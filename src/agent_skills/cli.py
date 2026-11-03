@@ -353,6 +353,9 @@ def _curses_select(recs, initial_chosen=None):
                         elif name in chosen:
                             stdscr.attron(curses.color_pair(3))
                         stdscr.addstr(content_top + i, 0, left_disp[: max(1, w - 1)])
+                        # Drop chosen color before scoring so score isn't tinted green.
+                        if i != local_idx and name in chosen:
+                            stdscr.attroff(curses.color_pair(3))
                         if score_x > len(left_disp):
                             gap = " " * max(0, score_x - len(left_disp))
                             if i == local_idx:
