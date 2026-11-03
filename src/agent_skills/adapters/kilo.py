@@ -32,7 +32,8 @@ from agent_skills.adapter_common import (
     build_skill_entry,
 )
 from agent_skills.config import resolve_library_root
-from agent_skills.discovery import detect_technologies, discover_skills, DiscoveryError
+from agent_skills.detection import detect_technologies
+from agent_skills.discovery import discover_skills, DiscoveryError
 from agent_skills.frontmatter import parse_frontmatter
 from agent_skills.links import MARKER_FILENAME, read_marker
 from agent_skills.lock import AdvisoryLock, LockError

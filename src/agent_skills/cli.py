@@ -14,7 +14,7 @@ from agent_skills.manifest import (
 )
 from agent_skills.project import find_project_root
 from agent_skills.detection import detect_technologies
-from agent_skills.recommend import recommend
+from agent_skills.recommend import recommend, filter_skills_for_context
 from agent_skills.links import generate_project_skills_dir, read_marker
 from agent_skills.lock import AdvisoryLock, LockError
 from agent_skills import identity

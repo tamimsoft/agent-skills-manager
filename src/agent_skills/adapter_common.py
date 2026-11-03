@@ -75,44 +75,60 @@ def build_wrapper(src_root, dest_root, rec):
     for entry in sorted(src_root.iterdir()):
         if entry.name == "SKILL.md":
             continue
+        # Skip macOS metadata files that are not part of the skill.
+        if entry.name == ".DS_Store" or entry.name.startswith("._"):
+            continue
         rel = entry.relative_to(src_root)
         dest_entry = dest_root / rel
         if entry.is_symlink():
             # Symlink: only replicate if target is inside the library root.
             if not _link_target_safe(entry):
                 continue
+            target = os.path.realpath(str(entry))
+            if not os.path.exists(target):
+                continue
             dest_entry.parent.mkdir(parents=True, exist_ok=True)
             if dest_entry.exists() or dest_entry.is_symlink():
                 dest_entry.unlink()
-            os.symlink(os.path.realpath(entry), dest_entry)
+            os.symlink(target, dest_entry)
             linked.append(str(rel))
         elif entry.is_dir():
             dest_entry.mkdir(parents=True, exist_ok=True)
             for sub in entry.rglob("*"):
                 sub_rel = sub.relative_to(src_root)
                 sub_dest = dest_root / sub_rel
+                if sub.name == ".DS_Store" or sub.name.startswith("._"):
+                    continue
                 if sub.is_symlink():
                     if not _link_target_safe(sub):
+                        continue
+                    target = os.path.realpath(str(sub))
+                    if not os.path.exists(target):
                         continue
                     sub_dest.parent.mkdir(parents=True, exist_ok=True)
                     if sub_dest.exists() or sub_dest.is_symlink():
                         sub_dest.unlink()
-                    os.symlink(os.path.realpath(sub), sub_dest)
+                    os.symlink(target, sub_dest)
                     linked.append(str(sub_rel))
                 elif sub.is_dir():
                     sub_dest.mkdir(parents=True, exist_ok=True)
                 else:
+                    target = os.path.realpath(str(sub))
+                    if not os.path.exists(target):
+                        continue
                     sub_dest.parent.mkdir(parents=True, exist_ok=True)
                     if sub_dest.exists() or sub_dest.is_symlink():
                         sub_dest.unlink()
-                    os.symlink(os.path.realpath(sub), sub_dest)
+                    os.symlink(target, sub_dest)
                     linked.append(str(sub_rel))
         else:
-            # Regular file inside src_root: safe to symlink.
+            target = os.path.realpath(str(entry))
+            if not os.path.exists(target):
+                continue
             dest_entry.parent.mkdir(parents=True, exist_ok=True)
             if dest_entry.exists() or dest_entry.is_symlink():
                 dest_entry.unlink()
-            os.symlink(os.path.realpath(entry), dest_entry)
+            os.symlink(target, dest_entry)
             linked.append(str(rel))
 
     return linked
@@ -134,13 +150,13 @@ def build_skill_entry(src_root, dest_root, rec):
         # Wrapper layout for frontmatter-less skill (§11.4).
         dest_entry.mkdir(parents=True, exist_ok=True)
         linked = build_wrapper(src_root, dest_entry, rec)
-        return [rec["dir_name"] + "/" + l for l in linked]
+        return linked
     else:
         # Direct symlink for skills with valid frontmatter.
         if dest_entry.exists() or dest_entry.is_symlink():
             dest_entry.unlink()
         os.symlink(os.path.realpath(src_root), dest_entry)
-        return [rec["dir_name"]]
+        return []
 
 
 def apply_context_budget(selected_records, sel, techs, cfg):
@@ -183,9 +199,20 @@ def build_skills_dir_atomic(parent, dest_dir, records, agent_name, key,
     try:
         managed_entries = []
         for rec in records:
-            src_root = Path(rec["real_path"]).parent
+            # rec["real_path"] is the skill directory; use it directly as src_root.
+            src_root = Path(rec["real_path"])
             dest_entry = tmp / rec["dir_name"]
             linked = build_entry_fn(src_root, tmp, rec)
+            if linked:
+                for l in linked:
+                    managed_entries.append("%s/%s" % (rec["dir_name"], l))
+            else:
+                managed_entries.append(rec["dir_name"])
+            if linked:
+                for l in linked:
+                    managed_entries.append("%s/%s" % (rec["dir_name"], l))
+            else:
+                managed_entries.append(rec["dir_name"])
             if linked:
                 for l in linked:
                     managed_entries.append("%s/%s" % (rec["dir_name"], l))

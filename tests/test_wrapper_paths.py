@@ -72,10 +72,10 @@ class TestWrapperRelativePaths(unittest.TestCase):
         readme_dest = os.path.join(skill_dest, "read me.txt")
         self.assertTrue(os.path.islink(readme_dest))
         self.assertTrue(os.path.exists(readme_dest))
-        # Linked entries reported with skill prefix.
-        self.assertTrue(any("src-skill/nested folder/config.yaml" in l for l in linked))
-        self.assertTrue(any("src-skill/scripts/run-check.sh" in l for l in linked))
-        self.assertTrue(any("src-skill/read me.txt" in l for l in linked))
+        # Linked entries reported relative to skill dir.
+        self.assertTrue(any("nested folder/config.yaml" in l for l in linked))
+        self.assertTrue(any("scripts/run-check.sh" in l for l in linked))
+        self.assertTrue(any("read me.txt" in l for l in linked))
 
     def test_originals_unchanged_by_checksum(self):
         rec = {"dir_name": "src-skill", "real_path": self.src}
@@ -109,7 +109,7 @@ class TestWrapperRelativePaths(unittest.TestCase):
         os.makedirs(vf_dest)
         linked = build_skill_entry(vf_src, vf_dest, rec)
         self.assertTrue(os.path.islink(os.path.join(vf_dest, "vf-skill")))
-        self.assertEqual(linked, ["vf-skill"])
+        self.assertEqual(linked, [])
 
 
 if __name__ == "__main__":

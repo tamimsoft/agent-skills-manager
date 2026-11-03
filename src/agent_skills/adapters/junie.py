@@ -33,7 +33,9 @@ from agent_skills.links import MARKER_FILENAME, read_marker
 from agent_skills.lock import AdvisoryLock, LockError
 from agent_skills.manifest import load_manifest, selected_ids, validate_manifest
 from agent_skills.config import resolve_library_root
+from agent_skills.detection import detect_technologies
 from agent_skills.discovery import discover_skills, DiscoveryError
+from agent_skills.project import find_project_root
 
 
 def _junie_exe(cfg):
@@ -97,6 +99,7 @@ def launch_junie(args, cfg):
         selected_records.append(rec_map[sid])
 
     # Apply context budget filtering: only symlink skills that fit in context.
+    techs = detect_technologies(root)
     filtered_records, skipped, _, cwarnings = apply_context_budget(
         selected_records, sel, techs, cfg,
     )
