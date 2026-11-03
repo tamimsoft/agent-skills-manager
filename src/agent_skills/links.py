@@ -66,7 +66,7 @@ def generate_project_skills_dir(generated_dir, selected_records, library_root, a
                     leftover.unlink()
                 except OSError:
                     pass
-    tmp = Path(tempfile.mkdtemp(prefix=".gen-", dir=str(parent)))
+    tmp = Path(tempfile.mkdtemp(prefix=".gen-tmp-", dir=str(parent)))
     try:
         managed_entries = []
         for rec in selected_records:

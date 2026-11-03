@@ -5,12 +5,12 @@ import os
 import sys
 from pathlib import Path
 
+from agent_skills.adapter_common import apply_context_budget
 from agent_skills.project import find_project_root
 from agent_skills.manifest import load_manifest, selected_ids
 from agent_skills.config import resolve_library_root
 from agent_skills.discovery import discover_skills
 from agent_skills.lock import AdvisoryLock, LockError
-from agent_skills.recommend import filter_skills_for_context
 from agent_skills.detection import detect_technologies
 
 
@@ -118,11 +118,9 @@ def plan(cfg):
     # Detect technologies for relevance-based budget filtering.
     techs = detect_technologies(root)
     # Apply context budget filtering for display.
-    budget_tokens = cfg.get("skill_context_budget_tokens") if isinstance(cfg, dict) else 32768
-    max_skills = cfg.get("max_skills_in_context") if isinstance(cfg, dict) else 50
     selected_records = [rec_map[sid] for sid in sel if sid in rec_map]
-    filtered_records, skipped, total_tokens, cwarnings = filter_skills_for_context(
-        selected_records, sel, techs, budget_tokens, max_skills,
+    filtered_records, skipped, total_tokens, _ = apply_context_budget(
+        selected_records, sel, techs, cfg,
     )
     # Derive display agent_ids from the filtered set so output matches rules.
     filtered_ids = [(r.get("agent_id") or {}).get("opencode") or r["dir_name"] for r in filtered_records]
@@ -199,11 +197,9 @@ def apply(cfg, dry_run=False, yes=False):
     # Detect technologies for relevance-based budget filtering.
     techs = detect_technologies(root)
     # Apply context budget filtering: only allow rules for skills that fit in context.
-    budget_tokens = cfg.get("skill_context_budget_tokens") if isinstance(cfg, dict) else 32768
-    max_skills = cfg.get("max_skills_in_context") if isinstance(cfg, dict) else 50
     selected_records = [rec_map[sid] for sid in sel if sid in rec_map]
-    filtered_records, skipped, total_tokens, cwarnings = filter_skills_for_context(
-        selected_records, sel, techs, budget_tokens, max_skills,
+    filtered_records, skipped, _, _ = apply_context_budget(
+        selected_records, sel, techs, cfg,
     )
     filtered_ids = [(r.get("agent_id") or {}).get("opencode") or r["dir_name"] for r in filtered_records]
     rules = _permission_rules(filtered_ids)

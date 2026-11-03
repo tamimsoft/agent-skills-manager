@@ -22,13 +22,18 @@ import sys
 import tempfile
 from pathlib import Path
 
+from agent_skills.adapter_common import (
+    apply_context_budget,
+    build_skills_dir_atomic,
+    build_wrapper,
+    build_skill_entry,
+)
 from agent_skills.frontmatter import parse_frontmatter
 from agent_skills.links import MARKER_FILENAME, read_marker
 from agent_skills.lock import AdvisoryLock, LockError
 from agent_skills.manifest import load_manifest, selected_ids, validate_manifest
 from agent_skills.config import resolve_library_root
 from agent_skills.discovery import discover_skills, DiscoveryError
-from agent_skills.recommend import filter_skills_for_context
 
 
 def _junie_exe(cfg):
@@ -46,103 +51,6 @@ def _generated_dir(cfg, root):
     key = "%s-%s" % (root.name,
                      hashlib.sha256(str(root.resolve()).encode()).hexdigest()[:12])
     return Path(generated_root) / key, key
-
-
-def _build_wrapper(src_root, dest_root, rec):
-    """Build a wrapper for a frontmatter-less skill, preserving relative
-    structure (§11.4). Only SKILL.md is regenerated; everything else is
-    symlinked at its original relative path."""
-    src_root = Path(src_root)
-    dest_root = Path(dest_root)
-    skill_md = src_root / "SKILL.md"
-
-    text = ""
-    if skill_md.is_file():
-        try:
-            with skill_md.open("r", encoding="utf-8", errors="replace") as f:
-                text = f.read(65536)
-        except OSError:
-            text = ""
-
-    fm_result = parse_frontmatter(text)
-    declared = None
-    description = None
-    if isinstance(fm_result, dict):
-        data = fm_result.get("data") or {}
-        declared = data.get("name")
-        description = data.get("description")
-
-    # Strip any existing frontmatter from body.
-    body = text
-    if body.startswith("---"):
-        lines = body.splitlines()
-        end_idx = None
-        for i in range(1, len(lines)):
-            if lines[i].strip() == "---":
-                end_idx = i
-                break
-        if end_idx is not None:
-            body = "\n".join(lines[end_idx + 1:])
-
-    name_val = declared or rec.get("dir_name")
-    desc_val = description or rec.get("description") or ""
-    new_md = "---\nname: %s\ndescription: %s\n---\n%s" % (
-        name_val, desc_val, body.lstrip("\n"))
-
-    dest_skill_md = dest_root / "SKILL.md"
-    dest_skill_md.write_text(new_md, encoding="utf-8")
-
-    linked = []
-    for entry in sorted(src_root.iterdir()):
-        if entry.name == "SKILL.md":
-            continue
-        rel = entry.relative_to(src_root)
-        dest_entry = dest_root / rel
-        if entry.is_dir():
-            for sub in entry.rglob("*"):
-                sub_rel = sub.relative_to(src_root)
-                sub_dest = dest_root / sub_rel
-                if sub.is_dir():
-                    sub_dest.mkdir(parents=True, exist_ok=True)
-                else:
-                    sub_dest.parent.mkdir(parents=True, exist_ok=True)
-                    if sub_dest.exists() or sub_dest.is_symlink():
-                        sub_dest.unlink()
-                    os.symlink(os.path.realpath(sub), sub_dest)
-                    linked.append(str(sub_rel))
-        else:
-            dest_entry.parent.mkdir(parents=True, exist_ok=True)
-            if dest_entry.exists() or dest_entry.is_symlink():
-                dest_entry.unlink()
-            os.symlink(os.path.realpath(entry), dest_entry)
-            linked.append(str(rel))
-
-    return linked
-
-
-def _build_skill_entry(src_root, dest_root, rec):
-    """Copy or wrapper a single skill into dest_root/<dir_name>/. Returns
-    list of managed relative entry names."""
-    src_root = Path(src_root)
-    dest_root = Path(dest_root)
-    skill_md = src_root / "SKILL.md"
-    fm_result = parse_frontmatter(
-        skill_md.read_text(encoding="utf-8", errors="replace")
-        if skill_md.is_file() else "")
-    dest_entry = dest_root / rec["dir_name"]
-    if fm_result.get("status") == "missing":
-        # Wrapper layout for frontmatter-less skill (§11.4): create a
-        # subdirectory named after the skill, regenerate only SKILL.md,
-        # symlink everything else at original relative path.
-        dest_entry.mkdir(parents=True, exist_ok=True)
-        linked = _build_wrapper(src_root, dest_entry, rec)
-        return [rec["dir_name"] + "/" + l for l in linked]
-    else:
-        # Direct symlink for skills with valid frontmatter.
-        if dest_entry.exists() or dest_entry.is_symlink():
-            dest_entry.unlink()
-        os.symlink(os.path.realpath(src_root), dest_entry)
-        return [rec["dir_name"]]
 
 
 def launch_junie(args, cfg):
@@ -189,10 +97,8 @@ def launch_junie(args, cfg):
         selected_records.append(rec_map[sid])
 
     # Apply context budget filtering: only symlink skills that fit in context.
-    budget_tokens = cfg.get("skill_context_budget_tokens") if isinstance(cfg, dict) else 32768
-    max_skills = cfg.get("max_skills_in_context") if isinstance(cfg, dict) else 50
-    filtered_records, skipped, total_tokens, cwarnings = filter_skills_for_context(
-        selected_records, sel, [], budget_tokens, max_skills,
+    filtered_records, skipped, _, cwarnings = apply_context_budget(
+        selected_records, sel, [], cfg,
     )
     if cwarnings:
         for w in cwarnings:
@@ -204,72 +110,16 @@ def launch_junie(args, cfg):
 
     try:
         with AdvisoryLock(lock_path):
-            # Build in a temp sibling.
-            parent = gen_dir.parent
-            parent.mkdir(parents=True, exist_ok=True)
-            # Clean up leftover .tmp-* / .old-* from a crashed run (§5.5).
-            import shutil as _shutil
-            for entry in os.listdir(parent):
-                name = entry
-                if name.startswith(".junie-skills-tmp-") or name.startswith(".junie-skills-old-"):
-                    leftover = parent / name
-                    if leftover.is_dir() and not leftover.is_symlink():
-                        _shutil.rmtree(leftover, ignore_errors=True)
-                    else:
-                        try:
-                            leftover.unlink()
-                        except OSError:
-                            pass
-            tmp = Path(tempfile.mkdtemp(prefix=".junie-skills-", dir=str(parent)))
-            try:
-                managed_entries = []
-                for rec in filtered_records:
-                    src_root = Path(rec["real_path"]).parent
-                    dest_entry = tmp / rec["dir_name"]
-                    linked = _build_skill_entry(src_root, tmp, rec)
-                    if linked:
-                        for l in linked:
-                            managed_entries.append("%s/%s" % (rec["dir_name"], l))
-                    else:
-                        managed_entries.append(rec["dir_name"])
-
-                marker = {
-                    "manager_version": "0.1.0",
-                    "schema_version": 1,
-                    "project_key": key,
-                    "agent": "junie",
-                    "managed_entries": managed_entries,
-                }
-                with (tmp / MARKER_FILENAME).open("w", encoding="utf-8") as f:
-                    json.dump(marker, f, indent=2)
-                    f.write("\n")
-
-                # Verify symlinks resolve.
-                for name in managed_entries:
-                    link = tmp / name
-                    if not link.exists():
-                        raise RuntimeError("broken generated link: %s" % link)
-
-                # Build-then-swap (§5.5).
-                old_marker_path = gen_dir / MARKER_FILENAME
-                old_aside = parent / (".junie-skills.old-%d" % os.getpid())
-                if gen_dir.exists() or gen_dir.is_symlink():
-                    if gen_dir.is_dir() and not gen_dir.is_symlink():
-                        os.rename(str(gen_dir), str(old_aside))
-                    else:
-                        gen_dir.unlink()
-                os.replace(tmp, gen_dir)
-                tmp = None
-
-                if old_aside.exists():
-                    import shutil
-                    shutil.rmtree(old_aside, ignore_errors=True)
-
-            finally:
-                if tmp is not None and Path(tmp).exists():
-                    import shutil
-                    shutil.rmtree(tmp, ignore_errors=True)
-
+            build_skills_dir_atomic(
+                parent=gen_dir.parent,
+                dest_dir=gen_dir,
+                records=filtered_records,
+                agent_name="junie",
+                key=key,
+                build_entry_fn=build_skill_entry,
+                tmp_prefix=".junie-skills-tmp-",
+                marker_filename=MARKER_FILENAME,
+            )
     except LockError as e:
         print("error: %s" % e, file=sys.stderr)
         return 1

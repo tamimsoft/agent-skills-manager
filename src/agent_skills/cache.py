@@ -65,8 +65,8 @@ def content_hash(skill_md_path, limit=65536):
         return None
 
 
-def cache_key_for_skill(skill_md_path):
-    """Return a list key: [real_path, mtime, size, content_hash]."""
+def stat_key_for_skill(skill_md_path):
+    """Return a list key: [real_path, mtime, size] (cheap stat only, no file read)."""
     try:
         p = Path(skill_md_path)
         st = p.stat()
@@ -74,10 +74,22 @@ def cache_key_for_skill(skill_md_path):
             str(p.resolve()),
             int(st.st_mtime),
             int(st.st_size),
-            content_hash(p),
         ]
     except OSError:
         return None
+
+
+def cache_key_for_skill(skill_md_path):
+    """Return full key: [real_path, mtime, size, content_hash].
+
+    Content hash is computed eagerly here; callers that only need a cheap
+    invalidation check should use stat_key_for_skill() first.
+    """
+    key = stat_key_for_skill(skill_md_path)
+    if key is None:
+        return None
+    key.append(content_hash(Path(skill_md_path)))
+    return key
 
 
 def is_cache_valid(cache, library_root, skill_entries, overrides_version=OVERRIDES_VERSION):
@@ -101,12 +113,20 @@ def is_cache_valid(cache, library_root, skill_entries, overrides_version=OVERRID
     if set(cached.keys()) != current_names:
         return False
     for dn, p in skill_entries:
-        key = cache_key_for_skill(p)
-        if key is None:
+        # Cheap stat-only check first: mtime+size is a sufficient proxy for
+        # content unchanged in the common case. Avoids reading SKILL.md on
+        # every cache hit.
+        stat_key = stat_key_for_skill(p)
+        if stat_key is None:
             return False
         ck = cached.get(dn)
         if not isinstance(ck, dict):
             return False
-        if ck.get("key") != key:
+        cached_key = ck.get("key")
+        if not isinstance(cached_key, list) or len(cached_key) < 3:
             return False
+        # Compare stat components (real_path, mtime, size).
+        if cached_key[:3] != stat_key:
+            return False
+        # Stat matches: content hash unchanged. Skip the 64 KB read.
     return True

@@ -229,14 +229,23 @@ def _curses_select(recs, initial_chosen=None):
     page = [0]
     search = [""]
     PAGE_SIZE = 20
+    # Memoization for filtered list and percent map, invalidated when search changes.
+    _last_search = [None]
+    _cached_filtered = [None]
+    _cached_percents = [None]
 
     def filtered_recs():
         s = search[0].lower()
+        if _cached_filtered[0] is not None and _last_search[0] == s:
+            return _cached_filtered[0]
         if not s:
-            return recs
-        return [r for r in recs if s in (r["record"].get("dir_name") or "").lower()
-                or s in (r["record"].get("declared_name") or "").lower()
-                or s in (r["record"].get("description") or "").lower()]
+            _cached_filtered[0] = recs
+        else:
+            _cached_filtered[0] = [r for r in recs if s in (r["record"].get("dir_name") or "").lower()
+                                   or s in (r["record"].get("declared_name") or "").lower()
+                                   or s in (r["record"].get("description") or "").lower()]
+        _last_search[0] = s
+        return _cached_filtered[0]
 
     def score_percent(filtered):
         if not filtered:
@@ -248,6 +257,13 @@ def _curses_select(recs, initial_chosen=None):
             r["record"]["dir_name"]: min(10, round(r["score"] / max_score * 10))
             for r in filtered
         }
+
+    def percents_for(filtered):
+        """Memoized score percent map, invalidated when search changes."""
+        if _cached_percents[0] is not None and _last_search[0] == search[0].lower():
+            return _cached_percents[0]
+        _cached_percents[0] = score_percent(filtered)
+        return _cached_percents[0]
 
     def page_count(filtered):
         return max(1, (len(filtered) + PAGE_SIZE - 1) // PAGE_SIZE)
@@ -289,7 +305,7 @@ def _curses_select(recs, initial_chosen=None):
             if idx[0] < start or idx[0] >= end:
                 idx[0] = start if page_items else 0
             local_idx = idx[0] - start if page_items else 0
-            percents = score_percent(filtered)
+            percents = percents_for(filtered)
 
             stdscr.clear()
             h, w = stdscr.getmaxyx()
@@ -508,37 +524,6 @@ def interactive_select(records, techs, limit=20, show_all=False, initial_selecte
     chosen = set(initial_selected or set())
     while True:
         print("\\nRecommendations (toggle numbers, Enter to confirm, 'q' to cancel):")
-        for i, r in enumerate(recs, start=1):
-            mark = "x" if r["record"]["dir_name"] in chosen else " "
-            print("  [%s] %2d. %s (score=%d)" % (mark, i, r["record"]["dir_name"], r["score"]))
-        try:
-            raw = input("> ").strip()
-        except EOFError:
-            raw = ""
-        if raw.lower() in ("", "done", "ok"):
-            break
-        if raw.lower() == "q":
-            return []
-        for tok in raw.split():
-            try:
-                idx = int(tok)
-            except ValueError:
-                continue
-            if 1 <= idx <= len(recs):
-                name = recs[idx - 1]["record"]["dir_name"]
-                if name in chosen:
-                    chosen.discard(name)
-                else:
-                    chosen.add(name)
-    return sorted(chosen)
-    from agent_skills.recommend import recommend
-    recs = recommend(records, techs, limit=limit, all_results=show_all)
-    if not recs:
-        print("No recommendations.")
-        return []
-    chosen = set()
-    while True:
-        print("\nRecommendations (toggle numbers, Enter to confirm, 'q' to cancel):")
         for i, r in enumerate(recs, start=1):
             mark = "x" if r["record"]["dir_name"] in chosen else " "
             print("  [%s] %2d. %s (score=%d)" % (mark, i, r["record"]["dir_name"], r["score"]))

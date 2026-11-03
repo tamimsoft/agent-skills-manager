@@ -9,7 +9,7 @@ import os
 import tempfile
 import unittest
 
-from agent_skills.adapters.junie import _build_skill_entry, _build_wrapper
+from agent_skills.adapter_common import build_wrapper, build_skill_entry
 
 
 def _sha256_file(path):
@@ -47,7 +47,7 @@ class TestWrapperRelativePaths(unittest.TestCase):
 
     def test_wrapper_preserves_nested_folder(self):
         rec = {"dir_name": "src-skill", "real_path": self.src}
-        linked = _build_skill_entry(self.src, self.dest, rec)
+        linked = build_skill_entry(self.src, self.dest, rec)
         # Skill subdirectory created.
         skill_dest = os.path.join(self.dest, "src-skill")
         self.assertTrue(os.path.isdir(skill_dest))
@@ -84,7 +84,7 @@ class TestWrapperRelativePaths(unittest.TestCase):
             for fn in files:
                 fp = os.path.join(root, fn)
                 before[fp] = _sha256_file(fp)
-        _build_skill_entry(self.src, self.dest, rec)
+        build_skill_entry(self.src, self.dest, rec)
         after = {}
         for root, _, files in os.walk(self.src):
             for fn in files:
@@ -94,7 +94,7 @@ class TestWrapperRelativePaths(unittest.TestCase):
 
     def test_build_skill_entry_uses_wrapper_for_no_frontmatter(self):
         rec = {"dir_name": "src-skill", "real_path": self.src}
-        linked = _build_skill_entry(self.src, self.dest, rec)
+        linked = build_skill_entry(self.src, self.dest, rec)
         self.assertTrue(os.path.isdir(os.path.join(self.dest, "src-skill")))
         self.assertTrue(any("nested folder" in l for l in linked))
 
@@ -107,7 +107,7 @@ class TestWrapperRelativePaths(unittest.TestCase):
         rec = {"dir_name": "vf-skill", "real_path": vf_src}
         vf_dest = os.path.join(self.td, "vf-dest")
         os.makedirs(vf_dest)
-        linked = _build_skill_entry(vf_src, vf_dest, rec)
+        linked = build_skill_entry(vf_src, vf_dest, rec)
         self.assertTrue(os.path.islink(os.path.join(vf_dest, "vf-skill")))
         self.assertEqual(linked, ["vf-skill"])
 
