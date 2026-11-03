@@ -32,7 +32,7 @@ from agent_skills.adapter_common import (
     build_skill_entry,
 )
 from agent_skills.config import resolve_library_root
-from agent_skills.discovery import discover_skills, DiscoveryError
+from agent_skills.discovery import detect_technologies, discover_skills, DiscoveryError
 from agent_skills.frontmatter import parse_frontmatter
 from agent_skills.links import MARKER_FILENAME, read_marker
 from agent_skills.lock import AdvisoryLock, LockError
@@ -98,17 +98,31 @@ def _load_kilo_json(path):
 
 
 def _apply_kilo_rules(existing, new_rules):
-    """Merge skill permission rules into Kilo config, preserving unrelated keys."""
+    """Merge skill permission rules into Kilo config, preserving unrelated keys.
+
+    Manager-owned keys are tracked via the ``_agent_skills_managed`` key so
+    re-apply removes only our own rules and preserves user-authored ones.
+    """
     cfg = dict(existing) if isinstance(existing, dict) else {}
     perms = cfg.get("permission")
     if not isinstance(perms, dict):
         perms = {}
     perms = dict(perms)
-    # Remove prior owned skill rules, add new.
-    skill_perms = {k: v for k, v in perms.items()
-                   if not (k.startswith("skill:") or k == "skill")}
-    skill_perms.update(new_rules)
-    perms = skill_perms
+    # Remove prior owned skill rules (tracked via _agent_skills_managed key).
+    managed_keys = perms.get("_agent_skills_managed", [])
+    if not isinstance(managed_keys, list):
+        managed_keys = []
+    for mk in managed_keys:
+        perms.pop(mk, None)
+    perms.pop("_agent_skills_managed", None)
+    # Remove the wildcard deny we manage.
+    perms.pop("*", None)
+    # Add new rules, tracking managed keys.
+    new_keys = []
+    for aid, effect in new_rules.items():
+        perms[aid] = effect
+        new_keys.append(aid)
+    perms["_agent_skills_managed"] = new_keys
     cfg["permission"] = perms
     return cfg
 
@@ -167,9 +181,11 @@ def launch_kilo(args, cfg):
                if isinstance(v, dict) and v.get("enabled", True)]
     res = resolve_resolutions(rec_map.values(), sel, ["kilo"] if "kilo" in enabled else [])
 
-    # Context budget filtering for reporting.
-    _, skipped, _, cwarnings = apply_context_budget(
-        selected_records, sel, [], cfg,
+    # Detect technologies for relevance-based budget filtering.
+    techs = detect_technologies(root)
+    # Context budget filtering: only symlink skills that fit in context.
+    filtered_records, skipped, _, cwarnings = apply_context_budget(
+        selected_records, sel, techs, cfg,
     )
     if cwarnings:
         for w in cwarnings:
@@ -187,7 +203,7 @@ def launch_kilo(args, cfg):
             build_skills_dir_atomic(
                 parent=skills_dir.parent,
                 dest_dir=skills_dir,
-                records=selected_records,
+                records=filtered_records,
                 agent_name="kilo",
                 key=key,
                 build_entry_fn=build_skill_entry,

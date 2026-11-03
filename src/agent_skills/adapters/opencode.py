@@ -74,28 +74,38 @@ def _agent_ids_for_selected(cfg, sel):
 
 
 def _apply_rules_to_config(cfg_obj, new_rules, new_policies=None):
-    """Return (new_config, changed) preserving unrelated settings."""
+    """Return (new_config, changed) preserving unrelated settings.
+
+    Manager-owned rules are tagged with ``source: agent-skills-manager`` so
+    re-apply removes only our own rules and preserves user-authored ones.
+    """
     cfg_obj = dict(cfg_obj) if isinstance(cfg_obj, dict) else {}
     perms = cfg_obj.get("permissions")
     if not isinstance(perms, list):
         perms = []
-    # Remove previously owned rules (exact match) then append new.
-    sidecar = None
-    # Caller handles sidecar; here just append new rules.
-    # We'll store owned rules separately; merge by removing exact owned matches.
-    owned = []
-    # The caller passes owned via closure? We'll handle in apply function.
-    # Simplest: replace permissions list's skill rules? Instead, append deny+allows at end.
-    # To avoid duplicates, remove any prior rules identical to new_rules.
-    kept = [r for r in perms if not (isinstance(r, dict) and r.get("action") == "skill")]
-    kept.extend(new_rules)
+    # Tag new manager-owned rules.
+    tagged_new = []
+    for r in new_rules:
+        r = dict(r)
+        r["source"] = "agent-skills-manager"
+        tagged_new.append(r)
+    # Remove only previously manager-owned rules; keep user-authored ones.
+    kept = [r for r in perms
+            if not (isinstance(r, dict) and r.get("source") == "agent-skills-manager")]
+    kept.extend(tagged_new)
     cfg_obj["permissions"] = kept
     if new_policies is not None:
         pols = cfg_obj.get("policies")
         if not isinstance(pols, list):
             pols = []
-        kept_p = [r for r in pols if not (isinstance(r, dict) and r.get("action") == "skill.use")]
-        kept_p.extend(new_policies)
+        tagged_p = []
+        for r in new_policies:
+            r = dict(r)
+            r["source"] = "agent-skills-manager"
+            tagged_p.append(r)
+        kept_p = [r for r in pols
+                  if not (isinstance(r, dict) and r.get("source") == "agent-skills-manager")]
+        kept_p.extend(tagged_p)
         cfg_obj["policies"] = kept_p
     return cfg_obj
 
@@ -132,6 +142,8 @@ def plan(cfg):
     if oc_jsonc.exists():
         lines.append("WARNING: opencode.jsonc exists; manager will not rewrite it. Resolve manually.")
     lines.append("Selected skills: %s" % (", ".join(sel) if sel else "(none)"))
+    budget_tokens = cfg.get("skill_context_budget_tokens") if isinstance(cfg, dict) else 32768
+    max_skills = cfg.get("max_skills_in_context") if isinstance(cfg, dict) else 50
     lines.append("Context budget: %d tokens, max %d skills" % (budget_tokens, max_skills))
     lines.append("Estimated context tokens: %d" % total_tokens)
     if skipped:

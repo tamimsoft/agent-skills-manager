@@ -87,6 +87,16 @@ def generate_project_skills_dir(generated_dir, selected_records, library_root, a
             json.dump(marker, f, indent=2)
             f.write("\n")
 
+        # Write opencode-owned-rules.json alongside the marker (AGENTS.md requirement).
+        owned_rules = {
+            "schema_version": schema_version,
+            "project_key": project_key,
+            "managed_entries": managed_entries,
+        }
+        with (tmp / OWNED_RULES_FILENAME).open("w", encoding="utf-8") as f:
+            json.dump(owned_rules, f, indent=2)
+            f.write("\n")
+
         # Verify all symlinks resolve.
         for name in managed_entries:
             link = tmp / name

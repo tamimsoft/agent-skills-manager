@@ -10,6 +10,10 @@ def _tokens(text):
     return re.findall(r"[A-Za-z0-9]+", text.lower())
 
 
+# Module-level cache for token estimates, keyed by real_path.
+_token_cache = {}
+
+
 def score_skill(record, technologies, existing_instructions_text=""):
     """Return (score, reasons_list) for a skill record."""
     score = 0
@@ -59,15 +63,15 @@ def recommend(records, technologies, limit=20, existing_instructions_text="", al
     return scored
 
 
-def _estimate_skill_tokens(record, _cache={}):
+def _estimate_skill_tokens(record):
     """Rough token estimate for a skill: read SKILL.md (bounded), chars // 4.
 
     Results are cached by real_path so repeated calls (apply/plan/launch)
     do not re-read the file on every invocation.
     """
     real_path = record.get("real_path") or ""
-    if real_path in _cache:
-        return _cache[real_path]
+    if real_path in _token_cache:
+        return _token_cache[real_path]
     skill_md = Path(real_path) / "SKILL.md"
     try:
         with skill_md.open("r", encoding="utf-8", errors="replace") as f:
@@ -75,7 +79,7 @@ def _estimate_skill_tokens(record, _cache={}):
         est = max(1, len(text) // 4)
     except OSError:
         est = 1024
-    _cache[real_path] = est
+    _token_cache[real_path] = est
     return est
 
 

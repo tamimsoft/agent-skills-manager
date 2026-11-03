@@ -98,7 +98,7 @@ def launch_junie(args, cfg):
 
     # Apply context budget filtering: only symlink skills that fit in context.
     filtered_records, skipped, _, cwarnings = apply_context_budget(
-        selected_records, sel, [], cfg,
+        selected_records, sel, techs, cfg,
     )
     if cwarnings:
         for w in cwarnings:

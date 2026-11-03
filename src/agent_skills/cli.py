@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
 
 from agent_skills import __version__
 from agent_skills.config import load_config, resolve_library_root, default_config
@@ -50,14 +51,17 @@ def _build_parser():
     p.add_argument("--all", action="store_true")
     p.add_argument("--filter", default="")
     p.add_argument("--tech", default="")
+    p.add_argument("--dry-run", action="store_true", dest="dry_run")
 
     # add
     p = sub.add_parser("add", help="add skills by dir_name")
     p.add_argument("skills", nargs="+")
+    p.add_argument("--dry-run", action="store_true", dest="dry_run")
 
     # remove
     p = sub.add_parser("remove", help="remove skills from manifest")
     p.add_argument("skills", nargs="+")
+    p.add_argument("--dry-run", action="store_true", dest="dry_run")
 
     # detect
     sub.add_parser("detect", help="show detected technologies")
@@ -154,8 +158,6 @@ def _discover(cfg, no_cache=False):
 
 
 def cmd_list(args, cfg):
-    no_cache = args.no_cache or args.no_cache if hasattr(args, "no_cache") else args.no_cache
-    # normalize
     no_cache = bool(getattr(args, "no_cache", False))
     library_root, records, warnings, errors = _discover(cfg, no_cache=no_cache)
 
@@ -464,7 +466,6 @@ def _curses_select(recs, initial_chosen=None):
 
 
 def interactive_select(records, techs, limit=20, show_all=False, initial_selected=None, filt="", tech=""):
-    from agent_skills.recommend import recommend
     # Apply user filter (substring match on dir_name, declared_name, description).
     if filt:
         f = filt.lower()
@@ -570,6 +571,13 @@ def cmd_select(args, cfg):
     if not chosen:
         print("No skills selected.")
         return 0
+    for sid in chosen:
+        if not identity.is_safe_id(sid):
+            print("error: unsafe skill id %r (cannot be selected)" % sid, file=sys.stderr)
+            return 1
+    if getattr(args, "dry_run", False):
+        print("would select: %s" % ", ".join(chosen))
+        return 0
     man, errs = load_manifest(root)
     if man is None:
         man = default_manifest(root.name)
@@ -650,6 +658,9 @@ def cmd_add(args, cfg):
     known = {r["dir_name"]: r for r in records}
     sel = selected_ids(man)
     for sid in args.skills:
+        if not identity.is_safe_id(sid):
+            print("error: unsafe skill id %r (cannot be selected)" % sid, file=sys.stderr)
+            return 1
         if sid not in known:
             print("error: unknown skill %r" % sid, file=sys.stderr)
             return 1
@@ -657,6 +668,9 @@ def cmd_add(args, cfg):
             print("error: already selected %r" % sid, file=sys.stderr)
             return 1
         sel.append(sid)
+    if getattr(args, "dry_run", False):
+        print("would add: %s" % ", ".join(args.skills))
+        return 0
     man.setdefault("skills", {})["selected"] = sel
     if not _confirm("Add %s to manifest?" % ", ".join(args.skills), getattr(args, "yes", False)):
         if not sys.stdin.isatty() and not getattr(args, "yes", False):
@@ -684,6 +698,9 @@ def cmd_remove(args, cfg):
             print("error: not selected %r" % sid, file=sys.stderr)
             return 1
     new_sel = [s for s in sel if s not in args.skills]
+    if getattr(args, "dry_run", False):
+        print("would remove: %s" % ", ".join(args.skills))
+        return 0
     man.setdefault("skills", {})["selected"] = new_sel
     if not _confirm("Remove %s from manifest?" % ", ".join(args.skills), getattr(args, "yes", False)):
         if not sys.stdin.isatty() and not getattr(args, "yes", False):
@@ -797,6 +814,17 @@ def cmd_sync(args, cfg):
         else:
             print("error: selected skill missing from library: %s" % sid, file=sys.stderr)
             return 1
+    # Detect technologies for relevance-based budget filtering.
+    techs = detect_technologies(root)
+    # Context budget filtering: only generate skills that fit in context.
+    filtered_records, skipped, total_tokens, cwarnings = filter_skills_for_context(
+        selected_records, sel, techs,
+        cfg.get("skill_context_budget_tokens") if isinstance(cfg, dict) else 32768,
+        cfg.get("max_skills_in_context") if isinstance(cfg, dict) else 50,
+    )
+    if cwarnings:
+        for w in cwarnings:
+            print("notice: %s" % w, file=sys.stderr)
     generated_root = cfg.get("generated_root") if isinstance(cfg, dict) else None
     from pathlib import Path
     if not generated_root:
@@ -806,13 +834,13 @@ def cmd_sync(args, cfg):
     key = "%s-%s" % (root.name, hashlib.sha256(str(root.resolve()).encode()).hexdigest()[:12])
     gen_dir = Path(generated_root) / key
     if getattr(args, "dry_run", False) or getattr(args, "dry-run", False):
-        print("would generate: %s with %d skills" % (gen_dir, len(selected_records)))
+        print("would generate: %s with %d skills" % (gen_dir, len(filtered_records)))
         return 0
     lock_path = Path(generated_root) / ".lock"
     try:
         with AdvisoryLock(lock_path):
             generate_project_skills_dir(
-                gen_dir, selected_records, library_root,
+                gen_dir, filtered_records, library_root,
                 allowed_roots=cfg.get("allowed_roots", []) if isinstance(cfg, dict) else [],
                 project_key=key,
             )
@@ -855,6 +883,30 @@ def cmd_doctor(args, cfg):
     return 0
 
 
+def _project_root_exists_for_prefix(prefix):
+    """Return True if a directory named `prefix` containing .agents/skills.json exists."""
+    if not prefix:
+        return False
+    # Search from cwd upward.
+    cur = Path.cwd().resolve()
+    while True:
+        candidate = cur / prefix
+        if candidate.is_dir() and (candidate / ".agents" / "skills.json").is_file():
+            return True
+        if cur.parent == cur:
+            break
+        cur = cur.parent
+    # Also check home directory children.
+    try:
+        for entry in Path.home().iterdir():
+            if entry.is_dir() and entry.name == prefix:
+                if (entry / ".agents" / "skills.json").is_file():
+                    return True
+    except OSError:
+        pass
+    return False
+
+
 def cmd_clean(args, cfg):
     generated_root = cfg.get("generated_root") if isinstance(cfg, dict) else None
     from pathlib import Path
@@ -872,8 +924,9 @@ def cmd_clean(args, cfg):
         if marker is None:
             continue
         pk = marker.get("project_key", "")
-        # We don't store root in manifest; heuristic: if name prefix root no longer exists? 
-        # Clean only if marker exists but directory is stale? For Phase 3, list managed dirs.
+        prefix = pk.rsplit("-", 1)[0] if pk else ""
+        if prefix and _project_root_exists_for_prefix(prefix):
+            continue  # project root still exists; not an orphan
         orphans.append(d)
     dry = getattr(args, "dry_run", False) or getattr(args, "dry-run", False)
     for d in orphans:

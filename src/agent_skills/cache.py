@@ -128,5 +128,9 @@ def is_cache_valid(cache, library_root, skill_entries, overrides_version=OVERRID
         # Compare stat components (real_path, mtime, size).
         if cached_key[:3] != stat_key:
             return False
-        # Stat matches: content hash unchanged. Skip the 64 KB read.
+        # Stat matches: verify content hash to guard against same-mtime/same-size edits.
+        cached_hash = cached_key[3] if len(cached_key) > 3 else None
+        current_hash = content_hash(Path(p))
+        if cached_hash is not None and current_hash is not None and cached_hash != current_hash:
+            return False
     return True

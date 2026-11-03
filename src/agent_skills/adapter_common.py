@@ -60,18 +60,46 @@ def build_wrapper(src_root, dest_root, rec):
     dest_skill_md = dest_root / "SKILL.md"
     dest_skill_md.write_text(new_md, encoding="utf-8")
 
+    src_real = src_root.resolve()
+
+    def _link_target_safe(path):
+        """Return True if the symlink target of `path` resolves inside src_real."""
+        try:
+            target = Path(os.path.realpath(str(path)))
+            target.relative_to(src_real)
+            return True
+        except ValueError:
+            return False
+
     linked = []
     for entry in sorted(src_root.iterdir()):
         if entry.name == "SKILL.md":
             continue
         rel = entry.relative_to(src_root)
         dest_entry = dest_root / rel
-        if entry.is_dir():
+        if entry.is_symlink():
+            # Symlink: only replicate if target is inside the library root.
+            if not _link_target_safe(entry):
+                continue
             dest_entry.parent.mkdir(parents=True, exist_ok=True)
+            if dest_entry.exists() or dest_entry.is_symlink():
+                dest_entry.unlink()
+            os.symlink(os.path.realpath(entry), dest_entry)
+            linked.append(str(rel))
+        elif entry.is_dir():
+            dest_entry.mkdir(parents=True, exist_ok=True)
             for sub in entry.rglob("*"):
                 sub_rel = sub.relative_to(src_root)
                 sub_dest = dest_root / sub_rel
-                if sub.is_dir():
+                if sub.is_symlink():
+                    if not _link_target_safe(sub):
+                        continue
+                    sub_dest.parent.mkdir(parents=True, exist_ok=True)
+                    if sub_dest.exists() or sub_dest.is_symlink():
+                        sub_dest.unlink()
+                    os.symlink(os.path.realpath(sub), sub_dest)
+                    linked.append(str(sub_rel))
+                elif sub.is_dir():
                     sub_dest.mkdir(parents=True, exist_ok=True)
                 else:
                     sub_dest.parent.mkdir(parents=True, exist_ok=True)
@@ -80,6 +108,7 @@ def build_wrapper(src_root, dest_root, rec):
                     os.symlink(os.path.realpath(sub), sub_dest)
                     linked.append(str(sub_rel))
         else:
+            # Regular file inside src_root: safe to symlink.
             dest_entry.parent.mkdir(parents=True, exist_ok=True)
             if dest_entry.exists() or dest_entry.is_symlink():
                 dest_entry.unlink()
