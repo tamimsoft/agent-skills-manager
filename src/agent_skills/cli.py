@@ -238,6 +238,17 @@ def _curses_select(recs, initial_chosen=None):
                 or s in (r["record"].get("declared_name") or "").lower()
                 or s in (r["record"].get("description") or "").lower()]
 
+    def score_percent(filtered):
+        if not filtered:
+            return {}
+        max_score = max(r["score"] for r in filtered)
+        if max_score <= 0:
+            return {r["record"]["dir_name"]: 0 for r in filtered}
+        return {
+            r["record"]["dir_name"]: min(10, round(r["score"] / max_score * 10))
+            for r in filtered
+        }
+
     def page_count(filtered):
         return max(1, (len(filtered) + PAGE_SIZE - 1) // PAGE_SIZE)
 
@@ -274,6 +285,7 @@ def _curses_select(recs, initial_chosen=None):
             if idx[0] < start or idx[0] >= end:
                 idx[0] = start if page_items else 0
             local_idx = idx[0] - start if page_items else 0
+            percents = score_percent(filtered)
 
             stdscr.clear()
             h, w = stdscr.getmaxyx()
@@ -322,9 +334,10 @@ def _curses_select(recs, initial_chosen=None):
             else:
                 for i, r in enumerate(page_items):
                     name = r["record"]["dir_name"]
-                    serial = start + i + 1
                     mark = "x" if name in chosen else " "
-                    line = "  [%s] %2d. %s (score=%d)" % (mark, serial, name, r["score"])
+                    pct = percents.get(name, 0)
+                    line = "  [%s] %s   %d/10" % (mark, name, pct)
+                    # Right-align the score column.
                     try:
                         if i == local_idx:
                             stdscr.attron(curses.color_pair(1) | curses.A_BOLD)
