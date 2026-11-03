@@ -48,6 +48,8 @@ def _build_parser():
     p = sub.add_parser("select", help="interactively select skills from recommendations")
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--all", action="store_true")
+    p.add_argument("--filter", default="")
+    p.add_argument("--tech", default="")
 
     # add
     p = sub.add_parser("add", help="add skills by dir_name")
@@ -270,8 +272,35 @@ def _curses_select(recs, initial_chosen=None):
     return sorted(chosen)
 
 
-def interactive_select(records, techs, limit=20, show_all=False, initial_selected=None):
+def interactive_select(records, techs, limit=20, show_all=False, initial_selected=None, filt="", tech=""):
     from agent_skills.recommend import recommend
+    # Apply user filter (substring match on dir_name, declared_name, description).
+    if filt:
+        f = filt.lower()
+        filtered = []
+        for r in records:
+            haystack = " ".join([
+                r.get("dir_name") or "",
+                r.get("declared_name") or "",
+                r.get("description") or "",
+            ]).lower()
+            if f in haystack:
+                filtered.append(r)
+        records = filtered
+    # If a single tech is requested, restrict candidates to those with a tech
+    # keyword overlap in their dir_name / declared_name / description.
+    if tech:
+        t = tech.lower()
+        filtered = []
+        for r in records:
+            haystack = " ".join([
+                r.get("dir_name") or "",
+                r.get("declared_name") or "",
+                r.get("description") or "",
+            ]).lower()
+            if t in haystack:
+                filtered.append(r)
+        records = filtered
     recs = recommend(records, techs, limit=limit, all_results=show_all)
     rec_names = {r["record"]["dir_name"] for r in recs}
     for r in records:
@@ -363,7 +392,7 @@ def cmd_select(args, cfg):
     if not sys.stdin.isatty() and not getattr(args, "yes", False):
         print("error: interactive selection requires a TTY or --yes", file=sys.stderr)
         return 4
-    chosen = interactive_select(records, techs, limit=getattr(args, "limit", 20), show_all=getattr(args, "all", False), initial_selected=initial)
+    chosen = interactive_select(records, techs, limit=getattr(args, "limit", 20), show_all=getattr(args, "all", False), initial_selected=initial, filt=getattr(args, "filter", ""), tech=getattr(args, "tech", ""))
     if not chosen:
         print("No skills selected.")
         return 0
