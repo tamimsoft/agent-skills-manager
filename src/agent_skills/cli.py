@@ -88,6 +88,7 @@ def _build_parser():
     # junie
     p = sub.add_parser("junie", help="launch Junie with managed skills")
     p.add_argument("--prepare", action="store_true")
+    p.add_argument("--dry-run", action="store_true", dest="dry_run")
     p.add_argument("args", nargs=argparse.REMAINDER)
 
     # kilo
@@ -865,7 +866,7 @@ def cmd_validate(args, cfg):
             sel = selected_ids(man)
             rec_map = {r["dir_name"]: r for r in records} if records else {}
             for sid in sel:
-                if sid not in rec_map and rec_map:
+                if sid not in rec_map:
                     ok = False
                     print("manifest references missing skill: %s" % sid)
             print("manifest: %s (selected=%d)" % (manifest_path(root), len(sel)))
@@ -973,6 +974,10 @@ def cmd_doctor(args, cfg):
     print("~/.local/bin on PATH: %s" % (local_bin in path.split(os.pathsep)))
     if local_bin not in path.split(os.pathsep):
         print("  add to ~/.zshrc: export PATH=\"$HOME/.local/bin:$PATH\"")
+    launcher = Path(local_bin) / "agent-skills"
+    print("agent-skills binary: %s" % ("found" if launcher.is_file() else "MISSING"))
+    if not launcher.is_file():
+        print("  run ./install.sh to install the launcher")
     # agent versions
     tested = cfg.get("tested_agent_versions", {}) if isinstance(cfg, dict) else {}
     for agent, ver in tested.items():

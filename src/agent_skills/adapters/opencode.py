@@ -307,9 +307,13 @@ def run_opencode_subcommand(args, cfg):
         print(msg)
         return rc
     if sub == "run":
+        dry = getattr(args, "dry_run", False)
         extra = getattr(args, "args", []) or []
         if extra and extra[0] == "--":
             extra = extra[1:]
+        if dry:
+            print("dry-run: would apply opencode config and run opencode with args: %s" % extra)
+            return 0
         return run(cfg, extra)
     print("unknown opencode subcommand", file=sys.stderr)
     return 2

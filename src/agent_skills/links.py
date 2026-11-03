@@ -78,6 +78,13 @@ def generate_project_skills_dir(generated_dir, selected_records, library_root, a
             _make_symlink(src_real, dest)
             managed_entries.append(rec["dir_name"])
 
+        # Write AGENTS.md into the generated dir so agents see global rules in context.
+        if agents_md_content is not None:
+            with (tmp / "AGENTS.md").open("w", encoding="utf-8") as f:
+                f.write(agents_md_content)
+                f.write("\n")
+            managed_entries.append("AGENTS.md")
+
         marker = {
             "manager_version": manager_version,
             "schema_version": schema_version,
@@ -97,13 +104,6 @@ def generate_project_skills_dir(generated_dir, selected_records, library_root, a
         with (tmp / OWNED_RULES_FILENAME).open("w", encoding="utf-8") as f:
             json.dump(owned_rules, f, indent=2)
             f.write("\n")
-
-        # Write AGENTS.md into the generated dir so agents see global rules in context.
-        if agents_md_content is not None:
-            with (tmp / "AGENTS.md").open("w", encoding="utf-8") as f:
-                f.write(agents_md_content)
-                f.write("\n")
-            managed_entries.append("AGENTS.md")
 
         # Verify all symlinks resolve.
         for name in managed_entries:

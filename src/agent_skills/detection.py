@@ -35,7 +35,7 @@ def _find_markers(root, max_depth=2):
             return
         for name in entries:
             full = cur / name
-            if full.is_dir():
+            if full.is_dir() and not full.is_symlink():
                 if name in SKIP_DIRS:
                     continue
                 walk(full, depth + 1)

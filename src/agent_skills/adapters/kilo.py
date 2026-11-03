@@ -261,7 +261,14 @@ def launch_kilo(args, cfg):
     print(resolution_summary(res))
 
     # For `run`: launch kilo.
+    dry = getattr(args, "dry_run", False)
     if getattr(args, "run_kilo", False):
+        if dry:
+            print("dry-run: would run kilo with dir: %s" % root)
+            print(ADDITIVE_NOTICE)
+            print("\nPer-agent resolution (kilo):")
+            print(resolution_summary(res))
+            return 0
         argv = [_kilo_exe(cfg), "run", "--dir", str(root)]
         argv += passthrough
         sys.stdout.flush()

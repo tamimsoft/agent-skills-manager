@@ -150,6 +150,14 @@ def launch_junie(args, cfg):
             " (%d excluded by context budget)" % skipped if skipped else ""))
         return 0
 
+    dry = getattr(args, "dry_run", False)
+    if dry:
+        print("dry-run: would launch junie with skill-location: %s" % gen_dir)
+        print("filtered skills: %d" % len(filtered_records))
+        if skipped:
+            print("notice: %d skills excluded by context budget" % skipped)
+        return 0
+
     # Build argv.
     argv = [_junie_exe(cfg), "--skill-default-locations", "false",
             "--skill-location", str(gen_dir)]
