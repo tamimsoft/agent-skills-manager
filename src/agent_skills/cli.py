@@ -251,8 +251,8 @@ def _curses_select(recs, initial_chosen=None):
             curses.init_pair(2, curses.COLOR_CYAN, -1)
             # Pair 3: check mark / selected skill
             curses.init_pair(3, curses.COLOR_GREEN, -1)
-            # Pair 4: search bar
-            curses.init_pair(4, curses.COLOR_YELLOW, -1)
+            # Pair 4: search bar (typed text)
+            curses.init_pair(4, curses.COLOR_WHITE, -1)
             # Pair 5: footer / hints
             curses.init_pair(5, curses.COLOR_MAGENTA, -1)
         except curses.error:
@@ -288,11 +288,11 @@ def _curses_select(recs, initial_chosen=None):
             except curses.error:
                 pass
 
-            # Search line.
+            # Search line — typed text highlighted.
             try:
-                stdscr.attron(curses.color_pair(4))
+                stdscr.attron(curses.color_pair(4) | curses.A_BOLD)
                 stdscr.addstr(1, 1, "Search: %s" % search[0])
-                stdscr.attroff(curses.color_pair(4))
+                stdscr.attroff(curses.color_pair(4) | curses.A_BOLD)
                 stdscr.addstr(1, 12 + len(search[0]), "  (type to filter, Backspace clear)")
             except curses.error:
                 pass
@@ -322,8 +322,9 @@ def _curses_select(recs, initial_chosen=None):
             else:
                 for i, r in enumerate(page_items):
                     name = r["record"]["dir_name"]
+                    serial = start + i + 1
                     mark = "x" if name in chosen else " "
-                    line = "  [%s] %s (score=%d)" % (mark, name, r["score"])
+                    line = "  [%s] %2d. %s (score=%d)" % (mark, serial, name, r["score"])
                     try:
                         if i == local_idx:
                             stdscr.attron(curses.color_pair(1) | curses.A_BOLD)
