@@ -1,17 +1,12 @@
 """Deterministic, explainable skill recommendations."""
 
 import re
-from pathlib import Path
 
 
 def _tokens(text):
     if not text:
         return []
     return re.findall(r"[A-Za-z0-9]+", text.lower())
-
-
-# Module-level cache for token estimates, keyed by real_path.
-_token_cache = {}
 
 
 def score_skill(record, technologies, existing_instructions_text=""):
@@ -64,23 +59,10 @@ def recommend(records, technologies, limit=20, existing_instructions_text="", al
 
 
 def _estimate_skill_tokens(record):
-    """Rough token estimate for a skill: read SKILL.md (bounded), chars // 4.
-
-    Results are cached by real_path so repeated calls (apply/plan/launch)
-    do not re-read the file on every invocation.
-    """
-    real_path = record.get("real_path") or ""
-    if real_path in _token_cache:
-        return _token_cache[real_path]
-    skill_md = Path(real_path) / "SKILL.md"
-    try:
-        with skill_md.open("r", encoding="utf-8", errors="replace") as f:
-            text = f.read(65536)
-        est = max(1, len(text) // 4)
-    except OSError:
-        est = 1024
-    _token_cache[real_path] = est
-    return est
+    """Estimate catalog context from the skill name and description only."""
+    name = record.get("declared_name") or record.get("dir_name") or ""
+    description = record.get("description") or ""
+    return max(1, (len(name) + len(description)) // 4)
 
 
 def filter_skills_for_context(records, selected_ids, technologies,
@@ -117,12 +99,13 @@ def filter_skills_for_context(records, selected_ids, technologies,
     total_tokens = 0
     budget_unlimited = budget_tokens is None or budget_tokens <= 0
     for r, s, reasons in scored:
+        est_tokens = _estimate_skill_tokens(r)
         if budget_unlimited:
             filtered.append(r)
+            total_tokens += est_tokens
             continue
-        est_tokens = _estimate_skill_tokens(r)
         if total_tokens + est_tokens > budget_tokens:
-            break
+            continue
         filtered.append(r)
         total_tokens += est_tokens
 
@@ -132,7 +115,7 @@ def filter_skills_for_context(records, selected_ids, technologies,
     warnings = []
     if skipped > 0:
         warnings.append(
-            "context budget: %d selected skill(s) excluded "
+            "context limits: %d selected skill(s) excluded "
             "(budget=%d tokens, max=%d skills)" %
             (skipped, budget_tokens if budget_tokens is not None else 0, max_skills if max_skills is not None else 0)
         )

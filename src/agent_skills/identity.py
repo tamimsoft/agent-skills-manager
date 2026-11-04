@@ -23,6 +23,42 @@ def is_safe_id(value):
     return bool(SAFE_ID_RE.match(value))
 
 
+def permission_ids_for_skill(record, agent_name):
+    """Return safe folder/declared aliases for an agent's skill permission rule."""
+    dir_name = record.get("dir_name")
+    declared_name = record.get("declared_name")
+    agent_ids = record.get("agent_id") or {}
+    primary = agent_ids.get(agent_name)
+    if not primary:
+        primary = declared_name if agent_name == "kilo" else dir_name
+    candidates = [primary, dir_name, declared_name]
+    ids = []
+    for candidate in candidates:
+        if candidate and is_safe_id(candidate) and candidate not in ids:
+            ids.append(candidate)
+    if not ids:
+        raise ValueError("no safe permission identifier for skill %r" % dir_name)
+    return ids
+
+
+def permission_ids_for_records(records, agent_name):
+    """Resolve permission IDs and reject aliases shared by distinct skills."""
+    ids = []
+    owners = {}
+    for record in records:
+        for identifier in permission_ids_for_skill(record, agent_name):
+            owner = owners.get(identifier)
+            if owner is not None and owner != record.get("dir_name"):
+                raise ValueError(
+                    "ambiguous %s permission identifier %r for %s and %s"
+                    % (agent_name, identifier, owner, record.get("dir_name"))
+                )
+            owners[identifier] = record.get("dir_name")
+            if identifier not in ids:
+                ids.append(identifier)
+    return ids
+
+
 def make_skill_record(dir_name, real_path, is_symlink, frontmatter_result, overrides=None):
     overrides = overrides or {}
     declared_name = None

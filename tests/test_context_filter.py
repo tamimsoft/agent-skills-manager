@@ -68,16 +68,30 @@ class TestContextFilter(unittest.TestCase):
 
     def test_token_budget_truncation(self):
         records = self._records(["alpha-skill", "beta-skill", "gamma-skill", "delta-skill"])
-        # Very small budget: only alpha fits.
+        # The catalog budget includes names/descriptions, not full skill bodies.
+        for record in records:
+            record["description"] = "description " * 20
+        records[0]["description"] = "short"
         filtered, skipped, total, warnings = filter_skills_for_context(
             records, ["alpha-skill", "beta-skill", "gamma-skill", "delta-skill"],
-            [], 100, 10,
+            [], 10, 10,
         )
         names = [r["dir_name"] for r in filtered]
         self.assertEqual(len(filtered), 1)
         self.assertEqual(names[0], "alpha-skill")
         self.assertEqual(skipped, 3)
-        self.assertTrue(any("context budget" in w for w in warnings))
+        self.assertTrue(any("context limits" in w for w in warnings))
+
+    def test_budget_skips_large_description_and_keeps_later_small_skill(self):
+        records = self._records(["alpha-skill", "beta-skill"])
+        records[0]["description"] = "x" * 100
+        records[1]["description"] = ""
+        filtered, skipped, total, warnings = filter_skills_for_context(
+            records, ["alpha-skill", "beta-skill"], [], 3, 10,
+        )
+        self.assertEqual([r["dir_name"] for r in filtered], ["beta-skill"])
+        self.assertEqual(skipped, 1)
+        self.assertGreater(total, 0)
 
     def test_max_skills_truncation(self):
         records = self._records(["alpha-skill", "beta-skill", "gamma-skill", "delta-skill"])
@@ -105,6 +119,7 @@ class TestContextFilter(unittest.TestCase):
         )
         self.assertEqual(len(filtered), 3)
         self.assertEqual(skipped, 0)
+        self.assertGreater(total, 0)
 
     def test_unlimited_budget_zero(self):
         records = self._records(["alpha-skill", "beta-skill"])
@@ -114,6 +129,7 @@ class TestContextFilter(unittest.TestCase):
         # budget_tokens=0 means unlimited.
         self.assertEqual(len(filtered), 2)
         self.assertEqual(skipped, 0)
+        self.assertGreater(total, 0)
 
     def test_empty_selection(self):
         records = self._records(["alpha-skill"])

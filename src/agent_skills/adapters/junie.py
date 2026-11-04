@@ -57,6 +57,7 @@ def _generated_dir(cfg, root):
 
 def launch_junie(args, cfg):
     prepare = getattr(args, "prepare", False)
+    dry = getattr(args, "dry_run", False)
     passthrough = getattr(args, "args", []) or []
     if passthrough and passthrough[0] == "--":
         passthrough = passthrough[1:]
@@ -86,7 +87,7 @@ def launch_junie(args, cfg):
         library_root=resolve_library_root(cfg),
         allowed_roots=cfg.get("allowed_roots", []) if isinstance(cfg, dict) else [],
         overrides=cfg.get("skill_overrides", {}) if isinstance(cfg, dict) else {},
-        no_cache=False,
+        no_cache=dry,
         cache_file=None,
     )
     rec_map = {r["dir_name"]: r for r in records}
@@ -100,11 +101,6 @@ def launch_junie(args, cfg):
 
     # Apply context budget filtering: only symlink skills that fit in context.
     techs = detect_technologies(root)
-    # Regenerate project AGENTS.md (force overwrite: launch refreshes it).
-    from agent_skills.cli import generate_agents_md
-    wrote_agents, msg_agents, agents_md_content = generate_agents_md(root, techs, cfg, force=True)
-    if msg_agents:
-        print("notice: %s" % msg_agents)
     filtered_records, skipped, _, cwarnings = apply_context_budget(
         selected_records, sel, techs, cfg,
     )
@@ -113,6 +109,22 @@ def launch_junie(args, cfg):
             print("notice: %s" % w, file=sys.stderr)
 
     gen_dir, key = _generated_dir(cfg, root)
+    if dry:
+        action = "prepare" if prepare else "launch"
+        print("dry-run: would %s junie with skill-location: %s" % (action, gen_dir))
+        print("filtered skills: %d" % len(filtered_records))
+        if skipped:
+            print("notice: %d skills excluded by context budget" % skipped)
+        return 0
+
+    from agent_skills.cli import generate_agents_md
+    wrote_agents, msg_agents, agents_md_content = generate_agents_md(root, techs, cfg)
+    if msg_agents:
+        print("notice: %s" % msg_agents)
+    if agents_md_content is None:
+        print("error: %s" % msg_agents, file=sys.stderr)
+        return 1
+
     gen_dir.parent.mkdir(parents=True, exist_ok=True)
     lock_path = gen_dir.parent / ".lock"
 
@@ -132,6 +144,9 @@ def launch_junie(args, cfg):
     except LockError as e:
         print("error: %s" % e, file=sys.stderr)
         return 1
+    except (OSError, RuntimeError) as e:
+        print("error: failed to generate Junie skills: %s" % e, file=sys.stderr)
+        return 1
 
     # Validate generated dir.
     marker = read_marker(gen_dir)
@@ -148,14 +163,6 @@ def launch_junie(args, cfg):
         print("prepared: %s (%d skills%s)" % (
             gen_dir, len(filtered_records),
             " (%d excluded by context budget)" % skipped if skipped else ""))
-        return 0
-
-    dry = getattr(args, "dry_run", False)
-    if dry:
-        print("dry-run: would launch junie with skill-location: %s" % gen_dir)
-        print("filtered skills: %d" % len(filtered_records))
-        if skipped:
-            print("notice: %d skills excluded by context budget" % skipped)
         return 0
 
     # Build argv.

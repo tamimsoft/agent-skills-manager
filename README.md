@@ -2,19 +2,19 @@
 
 **Global agent skill manager for OpenCode, Junie, and Kilo.** Python 3 (>=3.9), standard library only.
 
-Discover, validate, select, and sync agent skills (SKILL.md frontmatter files) into per-project generated skill directories that AI coding agents can consume — with enforced context budgets, safe symlink handling, and hard-enforced project instructions.
+Discover, validate, select, and sync agent skills (SKILL.md frontmatter files) into per-project agent configurations — with launch-time context limits, safe generated directories, and a protected manager-owned instructions block.
 
 ---
 
 ## The Problem
 
-AI coding agents (OpenCode, Junie, Kilo) load **all** skills from a shared global library by default. This creates three problems:
+Some coding agents discover skills from global directories as well as project directories. A large shared library can create three problems:
 
 1. **Context bloat** — Every skill in your library is injected into the agent's context window, regardless of whether it's relevant to the current project. A Flutter project shouldn't load .NET or Laravel skills, but without a manager, it does.
 2. **No per-project control** — There's no way to say "this project should only use these 10 skills" without manually editing agent config files in every project.
 3. **No hard enforcement** — Project-level instructions (AGENTS.md) are advisory. Agents can ignore them, and they go stale as your tech stack changes.
 
-`agent-skills-manager` solves all three. It maintains a shared skill library, lets you select a subset per project, enforces a context budget (tokens + max skills), generates per-project skill directories, and keeps `AGENTS.md` in sync across every managed launch.
+`agent-skills-manager` manages a shared library and project-specific selections. It applies context limits to managed launches and creates a project skill directory. Discovery behavior differs by agent: Kilo continues to catalog global skills, so complete isolation requires moving the library outside its default scan path.
 
 ---
 
@@ -22,9 +22,9 @@ AI coding agents (OpenCode, Junie, Kilo) load **all** skills from a shared globa
 
 | Problem | Without agent-skills-manager | With agent-skills-manager |
 |---------|------------------------------|---------------------------|
-| Context bloat | All ~1,400+ library skills load into every agent session | Only your selected skills (typically 5–15) are injected |
+| Context bloat | Global discovery may expose the full library | Managed launches use selected skills subject to configured context limits |
 | Per-project control | Manual edits to `opencode.json`, `.kilo/kilo.json`, Junie flags in every project | One manifest (`.agents/skills.json`) per project; one command syncs it everywhere |
-| Stale instructions | `AGENTS.md` drifts from your actual stack | Auto-regenerated on `sync` and every managed launch — never out of date |
+| Stale instructions | `AGENTS.md` drifts from your actual stack | Only the marked manager-owned block is refreshed; surrounding user content is preserved |
 | Unsafe symlinks | Library symlinks can escape to arbitrary filesystem paths | Allow-listed symlink resolution — targets must resolve inside the library root |
 | Context budget | No budget; every skill consumes tokens | Enforced token + max-skills budget with relevance-based truncation |
 
@@ -55,7 +55,7 @@ cd /path/to/your-project
 # 2. Create the manifest — detects technologies and recommends skills.
 agent-skills init
 
-# 3. Select skills interactively (requires TTY or --yes).
+# 3. Select skills interactively (requires TTY; --yes accepts confirmation).
 agent-skills select
 
 # 4. Or add specific skills by dir_name.
@@ -64,7 +64,8 @@ agent-skills add flutter-tamim code-reviewer
 # 5. Validate the manifest against the library.
 agent-skills validate
 
-# 6. Generate the project skills directory (respects context budget).
+# 6. Preview, then generate the project skills directory.
+agent-skills sync --dry-run
 agent-skills sync
 
 # 7. Launch an agent with managed skills.
@@ -74,9 +75,9 @@ agent-skills kilo plan
 ```
 
 **First-time behavior:**
-- `init` creates `.agents/skills.json` with an empty `selected` array and writes `AGENTS.md` (combining the global rules template + detected technology guidance). An existing `AGENTS.md` is **never overwritten**.
+- `init` creates `.agents/skills.json` with an empty `selected` array and merges a marked manager-owned block into `AGENTS.md`. Existing unmarked content is backed up under `.agents/backups/` and preserved.
 - Detected technologies are printed; recommended skills are shown but **not auto-selected**.
-- Use `--yes` to skip confirmations in non-TTY environments (CI, scripts).
+- Use subcommand flags such as `select --yes`, `sync --dry-run`, `kilo apply --yes`, and `opencode apply --yes`; these flags are not global.
 
 ---
 
@@ -84,10 +85,10 @@ agent-skills kilo plan
 
 ```bash
 # Manifest
-agent-skills init              # create .agents/skills.json (detects techs, recommends skills)
-agent-skills select            # interactively select skills (TTY or --yes)
-agent-skills add SKILL [...]   # add skills by dir_name (validates safe IDs)
-agent-skills remove SKILL [...]# remove skills from manifest
+agent-skills init [--yes] [--dry-run]
+agent-skills select [--yes] [--dry-run]
+agent-skills add SKILL [...] [--yes] [--dry-run]
+agent-skills remove SKILL [...] [--yes] [--dry-run]
 
 # Inspection
 agent-skills list [--selected] [--filter STR] [--tech STR] [--json]
@@ -99,13 +100,16 @@ agent-skills validate          # validate config, manifest, library (exit 3 on f
 agent-skills sync [--dry-run]  # regenerate generated project skills dir from manifest
 
 # Managed launches (context-budget enforced)
-agent-skills junie [--prepare] [args...]
-agent-skills kilo [args...]
-agent-skills opencode plan|apply|validate|run [args...]
+agent-skills junie [--prepare] [--dry-run] [args...]
+agent-skills kilo plan|validate
+agent-skills kilo apply|run [--yes] [--dry-run] [args...]
+agent-skills opencode plan|validate
+agent-skills opencode apply [--yes] [--dry-run]
+agent-skills opencode run [--dry-run] [args...]
 
 # Maintenance
 agent-skills doctor            # environment checks
-agent-skills clean [--dry-run] # list/remove orphaned generated directories
+agent-skills clean [--yes] [--dry-run] # list/remove orphaned generated directories
 ```
 
 ---
@@ -115,26 +119,28 @@ agent-skills clean [--dry-run] # list/remove orphaned generated directories
 Managed launches (`agent-skills junie`, `agent-skills kilo`, `agent-skills opencode apply|run`, `agent-skills sync`) limit which skills enter the agent context window:
 
 - Only skills listed in the project manifest `selected` array are eligible.
-- Eligible skills are scored by `recommend.score_skill()` (+5 tech match, +1 keyword overlap, +min(3) instruction overlap), sorted by score then dir_name, and truncated to fit the budget.
-- `skill_context_budget_tokens` (default 32768): estimated max tokens for all skill context. Set 0 for unlimited.
+- Eligible skills are scored by `recommend.score_skill()` (+5 tech match, +1 keyword overlap, +min(3) instruction overlap), sorted by score then dir_name, and filtered to fit the configured limits.
+- The estimate covers catalog metadata (skill name and description), not full skill bodies; it is a rough estimate, not the agent's complete prompt-token count.
+- `skill_context_budget_tokens` (default 32768): estimated maximum catalog tokens. Set 0 for unlimited.
 - `max_skills_in_context` (default 50): hard cap on skill count. Set 0 for unlimited.
 - Skills excluded by the budget are reported as warnings; selection is unchanged in the manifest.
-- Unmanaged launches (plain `opencode` or `junie`, not through the manager) load all skills in the global library — this asymmetry is by design.
+- The manifest's `selected` list is unchanged when limits exclude skills. `sync` and managed launches report exclusions.
+- Plain `opencode` or `junie` launches bypass manager filtering. Kilo 7.8.18 catalogs global `~/.agents/skills/` entries even during managed launches; its permission rules do not remove them from the catalog. Exclusive Kilo discovery requires moving the library outside that path and pointing `library_root` to the new location.
 
 Config fields live in `~/.config/agent-skills/config.json` (schema v1). Override via `AGENT_SKILLS_HOME` / `AGENT_SKILLS_CONFIG` env vars for tests.
 
 ---
 
-## Hard-Enforced AGENTS.md
+## Managed AGENTS.md block
 
 Unlike a static `AGENTS.md` that agents can ignore, `agent-skills-manager` treats it as a live artifact:
 
-- **`init`** generates it once (safe merge — never overwrites an existing file).
-- **`sync`** and every managed launch (`junie`, `opencode apply|run`, `kilo apply|run`) regenerate it from the global rules template + your detected technologies.
-- **`validate`** fails (exit 3) if `AGENTS.md` is missing or stale.
-- **Protected from clobbering** — on macOS/Linux the generated `AGENTS.md` is marked immutable (best-effort) so an agent's own `/init` command cannot overwrite or delete it; `sync`/launches clear the flag before regenerating. To edit it manually, run `chflags nouchg AGENTS.md` (macOS) or `chattr -i AGENTS.md` (Linux).
+- `init`, `sync`, and managed launches update only the `<!-- agent-skills:begin -->` / `<!-- agent-skills:end -->` block.
+- Existing text outside the block is preserved. An unmarked existing file is backed up once before the block is appended.
+- `plan` and `validate` are read-only; `validate` reports a missing, malformed, or stale block.
+- The manager does not set or clear filesystem immutable flags. If an older version marked the file immutable, remove that flag manually before the first update (`chflags nouchg AGENTS.md` on macOS or `chattr -i AGENTS.md` on Linux).
 
-This keeps the global engineering rules in front of the agent on every session, and keeps them current as your stack evolves.
+This keeps generated project guidance current without replacing user-authored instructions. Instructions remain advisory to the agent.
 
 ---
 
@@ -149,7 +155,7 @@ Skill IDs (folder names) must match `^[A-Za-z0-9][A-Za-z0-9._-]*$`. Names with s
 ```
 ┌─────────────────┐     ┌──────────────────────────┐     ┌─────────────────────┐
 │   Library root  │     │   Project manifest       │     │   Generated skills    │
-│ ~/.agents/skills│────▶│  .agents/skills.json     │────▶│   dir (symlinks)      │
+│ ~/.agents/skills│────▶│  .agents/skills.json     │────▶│   dir (agent-specific)│
 │  SKILL.md files │     │   (selected skill IDs)   │     │   + AGENTS.md + marker│
 └─────────────────┘     └──────────────────────────┘     └─────────────────────┘
                                                          │
@@ -158,18 +164,18 @@ Skill IDs (folder names) must match `^[A-Za-z0-9][A-Za-z0-9._-]*$`. Names with s
             ┌─────────────┐                      ┌───────────┐         ┌──────────┐
             │   OpenCode  │                      │   Junie   │         │   Kilo   │
             │   (apply)   │                      │   launch  │         │  (apply) │
-            │ permissions │                      │ --skill-location   permission rules
-            │   + policies│                      │   generated dir    in kilo.json
+            │ permission  │                      │ --skill-location   permission rules
+            │   .skill    │                      │   generated dir    in kilo.json
             └─────────────┘                      └───────────┘         └──────────┘
 ```
 
 - **Discovery**: `discover_skills()` scans the library root, parses SKILL.md frontmatter, validates safe IDs, allow-lists symlinks (targets must resolve inside the library root), and caches results.
-- **Manifest**: `.agents/skills.json` lists selected skill IDs; `init` detects technologies and recommends skills; `generate_agents_md()` creates `AGENTS.md` (safe merge — never overwrites).
+- **Manifest**: `.agents/skills.json` lists selected skill IDs; `init` detects technologies and recommends skills; `generate_agents_md()` safely refreshes only its marked `AGENTS.md` block.
 - **Sync/build**: `sync` (and managed launches) apply the context budget (tech-match scoring + token/max-skill caps), then atomically build-then-swap the generated skills dir via `AdvisoryLock` (fcntl.flock, 10s timeout).
 - **Adapter behavior**:
-  - **OpenCode** — writes permission rules + `skill.use` policies into `opencode.json` plus an `opencode-owned-rules.json` sidecar; user-authored rules are preserved (tagged `source: agent-skills-manager`).
+  - **OpenCode** — writes `permission.skill` rules into `opencode.json`; manager ownership is tracked in `.agents/opencode-owned-rules.json`, and tagged legacy rules are migrated with a backup.
   - **Junie** — launches with `--skill-default-locations=false --skill-location=<generated dir>`; additive library loading remains for unmanaged Junie.
-  - **Kilo** — additive (no exclusive skill-path mechanism); writes permission rules into `.kilo/kilo.json` and generates `.kilo/skills/` with marker.
+  - **Kilo** — writes `permission.skill` rules to `.kilo/kilo.json` and copies only budget-filtered selected skills into `.kilo/skills/` because Kilo does not discover project links outside the worktree. Global skills remain in its catalog.
 - **Context budget**: Only `selected` skills are eligible; they are scored (+5 tech match, +1 keyword overlap, +min(3) instruction overlap), sorted by score then dir_name, and truncated to `skill_context_budget_tokens` / `max_skills_in_context`. Excluded skills are reported as warnings; manifest selection is unchanged.
 
 ---
@@ -180,7 +186,7 @@ Skill IDs (folder names) must match `^[A-Za-z0-9][A-Za-z0-9._-]*$`. Names with s
 PYTHONPATH=src python3 -m unittest discover -s tests
 ```
 
-66 tests covering discovery, frontmatter parsing, identity/safe-ID validation, context budget filtering, cache invalidation, crash recovery, link generation, resolution, and AGENTS.md hard enforcement.
+Tests cover discovery, frontmatter parsing, identity/safe-ID validation, context-budget filtering, CLI flags, adapter config migration, crash recovery, generated-directory safety, resolution, and managed AGENTS.md behavior.
 
 ---
 
@@ -197,13 +203,13 @@ PYTHONPATH=src python3 -m unittest discover -s tests
 | `src/agent_skills/config.py` | Config load/save/validate, env var overrides |
 | `src/agent_skills/cache.py` | Discovery cache with stat + content-hash invalidation |
 | `src/agent_skills/lock.py` | fcntl.flock advisory lock (10s timeout) |
-| `src/agent_skills/links.py` | Atomic build-then-swap project skills dir generation |
+| `src/agent_skills/links.py` | Managed-directory marker reading and cleanup |
 | `src/agent_skills/detection.py` | Technology marker scanning |
 | `src/agent_skills/resolution.py` | Per-agent resolution states |
 | `src/agent_skills/adapter_common.py` | Shared wrapper/build/budget helpers |
 | `src/agent_skills/adapters/{junie,kilo,opencode}.py` | Agent-specific launchers |
 
-Generated project dirs contain `.agent-skills-managed.json` marker, `opencode-owned-rules.json`, and `AGENTS.md`; `sync` regenerates them atomically.
+Generated project directories are rebuilt atomically with a `.agent-skills-managed.json` marker and `AGENTS.md`. The OpenCode rules sidecar is stored in the project's `.agents/` directory.
 
 ---
 

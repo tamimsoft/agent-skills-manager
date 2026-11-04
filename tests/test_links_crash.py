@@ -1,11 +1,13 @@
 """Crash recovery and concurrency tests for build-then-swap (§15.3, R-04 / V21)."""
 
+import json
 import os
 import tempfile
 import unittest
 from pathlib import Path
 
-from agent_skills.links import generate_project_skills_dir, MARKER_FILENAME, read_marker
+from agent_skills.adapter_common import build_skill_entry, build_skills_dir_atomic
+from agent_skills.links import read_marker
 
 
 def _make_record(dir_name, real_path, is_symlink=False):
@@ -29,9 +31,20 @@ class TestCrashRecovery(unittest.TestCase):
             f.write("---\nname: test\ndescription: test\n---\n")
         self.gen = os.path.join(self.td, "gen")
 
+    def _build(self, records):
+        return build_skills_dir_atomic(
+            parent=Path(self.td),
+            dest_dir=Path(self.gen),
+            records=records,
+            agent_name="manager",
+            key="test-project",
+            build_entry_fn=build_skill_entry,
+            tmp_prefix=".gen-tmp-",
+        )
+
     def test_normal_swap(self):
         rec = _make_record("test-skill", os.path.join(self.lib, "test-skill"))
-        generate_project_skills_dir(self.gen, [rec], self.lib)
+        self._build([rec])
         self.assertTrue(os.path.isdir(self.gen))
         link = os.path.join(self.gen, "test-skill")
         self.assertTrue(os.path.islink(link))
@@ -39,21 +52,56 @@ class TestCrashRecovery(unittest.TestCase):
         marker = read_marker(self.gen)
         self.assertIsNotNone(marker)
         self.assertEqual(marker["managed_entries"], ["test-skill"])
+        self.assertEqual(marker["agent"], "manager")
 
-    def test_refresh_cleans_old_tmp_old(self):
+    def test_cleanup_targets_only_owned_temporary_prefix(self):
         rec = _make_record("test-skill", os.path.join(self.lib, "test-skill"))
-        generate_project_skills_dir(self.gen, [rec], self.lib)
-        # Simulate leftover .tmp-* and .old-* from a crashed previous run.
-        parent = os.path.dirname(self.gen)
-        tmp_path = os.path.join(parent, ".gen-tmp-123")
-        old_path = os.path.join(parent, ".gen-old-123")
-        os.makedirs(tmp_path, exist_ok=True)
-        os.makedirs(old_path, exist_ok=True)
-        # Re-run should clean up leftovers.
-        generate_project_skills_dir(self.gen, [rec], self.lib)
-        self.assertFalse(os.path.exists(tmp_path))
-        self.assertFalse(os.path.exists(old_path))
+        tmp_path = Path(self.td) / ".gen-tmp-abandoned"
+        unmarked_tmp = Path(self.td) / ".gen-tmp-user-data"
+        unrelated_path = Path(self.td) / ".gen-other"
+        old_path = Path(self.td) / ".gen-tmp-old-unmarked"
+        tmp_path.mkdir()
+        unmarked_tmp.mkdir()
+        (tmp_path / ".agent-skills-build.json").write_text(json.dumps({
+            "project_key": "test-project",
+            "agent": "manager",
+        }))
+        unrelated_path.mkdir()
+        old_path.mkdir()
+        self._build([rec])
+        self.assertFalse(tmp_path.exists())
+        self.assertTrue(unmarked_tmp.exists())
+        self.assertTrue(unrelated_path.exists())
+        self.assertTrue(old_path.exists())
         self.assertTrue(os.path.islink(os.path.join(self.gen, "test-skill")))
+
+    def test_restores_marked_old_directory_after_interrupted_swap(self):
+        rec = _make_record("test-skill", os.path.join(self.lib, "test-skill"))
+        self._build([rec])
+        old_path = Path(self.td) / ".gen-tmp-old-crashed"
+        os.replace(self.gen, old_path)
+        self.assertFalse(Path(self.gen).exists())
+        self._build([rec])
+        self.assertTrue(os.path.islink(os.path.join(self.gen, "test-skill")))
+        self.assertFalse(old_path.exists())
+
+    def test_restores_legacy_old_directory_name(self):
+        rec = _make_record("test-skill", os.path.join(self.lib, "test-skill"))
+        self._build([rec])
+        old_path = Path(self.td) / ".gen-tmp.old-123"
+        os.replace(self.gen, old_path)
+        self._build([rec])
+        self.assertTrue(os.path.islink(os.path.join(self.gen, "test-skill")))
+        self.assertFalse(old_path.exists())
+
+    def test_unmarked_destination_is_preserved(self):
+        os.makedirs(self.gen)
+        user_file = Path(self.gen) / "user-file"
+        user_file.write_text("keep")
+        rec = _make_record("test-skill", os.path.join(self.lib, "test-skill"))
+        with self.assertRaisesRegex(RuntimeError, "unmarked generated directory"):
+            self._build([rec])
+        self.assertEqual(user_file.read_text(), "keep")
 
     def test_deselected_skill_removed(self):
         # First run with one skill.
@@ -61,11 +109,11 @@ class TestCrashRecovery(unittest.TestCase):
         os.makedirs(os.path.join(self.lib, "skill-a"))
         with open(os.path.join(self.lib, "skill-a", "SKILL.md"), "w") as f:
             f.write("---\nname: a\ndescription: a\n---\n")
-        generate_project_skills_dir(self.gen, [rec1], self.lib)
+        self._build([rec1])
         self.assertTrue(os.path.islink(os.path.join(self.gen, "skill-a")))
 
         # Second run with no skills (deselect all).
-        generate_project_skills_dir(self.gen, [], self.lib)
+        self._build([])
         self.assertFalse(os.path.exists(os.path.join(self.gen, "skill-a")))
         marker = read_marker(self.gen)
         self.assertEqual(marker["managed_entries"], [])

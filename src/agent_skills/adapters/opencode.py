@@ -5,13 +5,18 @@ import os
 import sys
 from pathlib import Path
 
-from agent_skills.adapter_common import apply_context_budget
+from agent_skills.adapter_common import (
+    apply_context_budget,
+    backup_config_file,
+    write_json_atomic,
+)
 from agent_skills.project import find_project_root
 from agent_skills.manifest import load_manifest, selected_ids
 from agent_skills.config import resolve_library_root
 from agent_skills.discovery import discover_skills
 from agent_skills.lock import AdvisoryLock, LockError
 from agent_skills.detection import detect_technologies
+from agent_skills.identity import permission_ids_for_records
 
 
 def _opencode_exe(cfg):
@@ -23,18 +28,9 @@ def _opencode_exe(cfg):
 
 
 def _permission_rules(selected_agent_ids):
-    # V2 permissions array (execution-time): blocks loading unselected skills.
-    rules = [{"action": "skill", "resource": "*", "effect": "deny"}]
+    rules = {"*": "deny"}
     for aid in selected_agent_ids:
-        rules.append({"action": "skill", "resource": aid, "effect": "allow"})
-    return rules
-
-
-def _policy_rules(selected_agent_ids):
-    # Policies (binary) actually remove denied skills from the catalog.
-    rules = [{"action": "skill.use", "resource": "*", "effect": "deny"}]
-    for aid in selected_agent_ids:
-        rules.append({"action": "skill.use", "resource": aid, "effect": "allow"})
+        rules[aid] = "allow"
     return rules
 
 
@@ -48,7 +44,24 @@ def _load_json(path):
     if not Path(path).exists():
         return {}
     with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError("OpenCode config must contain a JSON object")
+    return data
+
+
+def _load_owned_rules(path):
+    if not Path(path).exists():
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError("OpenCode owned-rules sidecar must contain a JSON object")
+    if data.get("schema_version") == 1 and isinstance(data.get("rules"), dict):
+        return data
+    if isinstance(data.get("rules"), list):
+        return {"schema_version": 0, "rules": {}}
+    raise ValueError("invalid OpenCode owned-rules sidecar")
 
 
 def _agent_ids_for_selected(cfg, sel):
@@ -60,54 +73,87 @@ def _agent_ids_for_selected(cfg, sel):
         cache_file=None,
     )
     rec_map = {r["dir_name"]: r for r in records}
-    ids = []
+    selected_records = []
     for sid in sel:
         rec = rec_map.get(sid)
         if rec is None:
             raise ValueError("selected skill missing from library: %s" % sid)
-        aid = (rec.get("agent_id") or {}).get("opencode")
-        # Default: use dir_name as agent_id until V1/V3 verified.
-        if not aid:
-            aid = rec["dir_name"]
-        ids.append(aid)
+        selected_records.append(rec)
+    ids = permission_ids_for_records(selected_records, "opencode")
     return ids, warnings, rec_map
 
 
-def _apply_rules_to_config(cfg_obj, new_rules, new_policies=None):
-    """Return (new_config, changed) preserving unrelated settings.
+def _apply_rules_to_config(cfg_obj, new_rules, owned_rules=None):
+    """Apply nested skill permissions and preserve all user-authored rules."""
+    if not isinstance(cfg_obj, dict):
+        raise ValueError("OpenCode config must contain a JSON object")
+    if owned_rules is not None and not isinstance(owned_rules, dict):
+        raise ValueError("OpenCode owned-rules sidecar must contain a JSON object")
+    cfg_obj = dict(cfg_obj)
+    warnings = []
 
-    Manager-owned rules are tagged with ``source: agent-skills-manager`` so
-    re-apply removes only our own rules and preserves user-authored ones.
-    """
-    cfg_obj = dict(cfg_obj) if isinstance(cfg_obj, dict) else {}
-    perms = cfg_obj.get("permissions")
-    if not isinstance(perms, list):
-        perms = []
-    # Tag new manager-owned rules.
-    tagged_new = []
-    for r in new_rules:
-        r = dict(r)
-        r["source"] = "agent-skills-manager"
-        tagged_new.append(r)
-    # Remove only previously manager-owned rules; keep user-authored ones.
-    kept = [r for r in perms
-            if not (isinstance(r, dict) and r.get("source") == "agent-skills-manager")]
-    kept.extend(tagged_new)
-    cfg_obj["permissions"] = kept
-    if new_policies is not None:
-        pols = cfg_obj.get("policies")
-        if not isinstance(pols, list):
-            pols = []
-        tagged_p = []
-        for r in new_policies:
-            r = dict(r)
-            r["source"] = "agent-skills-manager"
-            tagged_p.append(r)
-        kept_p = [r for r in pols
-                  if not (isinstance(r, dict) and r.get("source") == "agent-skills-manager")]
-        kept_p.extend(tagged_p)
-        cfg_obj["policies"] = kept_p
-    return cfg_obj
+    for legacy_name in ("permissions", "policies"):
+        legacy = cfg_obj.get(legacy_name)
+        if isinstance(legacy, list):
+            kept = [
+                rule for rule in legacy
+                if not (
+                    isinstance(rule, dict)
+                    and rule.get("source") == "agent-skills-manager"
+                )
+            ]
+            if kept:
+                cfg_obj[legacy_name] = kept
+            else:
+                cfg_obj.pop(legacy_name, None)
+
+    permission = cfg_obj.get("permission")
+    if permission is None:
+        permission = {}
+    if not isinstance(permission, dict):
+        raise ValueError("OpenCode permission config must be an object")
+    permission = dict(permission)
+    skill_rules = permission.get("skill")
+    if skill_rules is None:
+        skill_rules = {}
+    if not isinstance(skill_rules, dict):
+        raise ValueError("OpenCode permission.skill config must be an object")
+    skill_rules = dict(skill_rules)
+
+    previous_rules = (owned_rules or {}).get("rules", {})
+    if not isinstance(previous_rules, dict):
+        raise ValueError("OpenCode owned-rules sidecar has an invalid rules object")
+    for key, value in previous_rules.items():
+        if skill_rules.get(key) == value:
+            skill_rules.pop(key)
+        else:
+            warnings.append("preserving user-edited OpenCode skill rule for %s" % key)
+
+    manager_rules = {}
+    for key, value in new_rules.items():
+        if key in skill_rules:
+            if skill_rules[key] != value:
+                warnings.append("preserving user OpenCode skill rule for %s" % key)
+            continue
+        skill_rules[key] = value
+        manager_rules[key] = value
+
+    ordered_rules = {}
+    if "*" in skill_rules:
+        ordered_rules["*"] = skill_rules.pop("*")
+    selected_keys = [key for key in new_rules if key != "*"]
+    for key, value in skill_rules.items():
+        if key not in selected_keys:
+            ordered_rules[key] = value
+    for key in selected_keys:
+        if key in skill_rules:
+            ordered_rules[key] = skill_rules[key]
+    if ordered_rules:
+        permission["skill"] = ordered_rules
+    else:
+        permission.pop("skill", None)
+    cfg_obj["permission"] = permission
+    return cfg_obj, {"schema_version": 1, "rules": manager_rules}, warnings
 
 
 def plan(cfg):
@@ -128,18 +174,16 @@ def plan(cfg):
     # Detect technologies for relevance-based budget filtering.
     techs = detect_technologies(root)
     lines = []
-    # Regenerate project AGENTS.md (plan refreshes it).
-    from agent_skills.cli import generate_agents_md
-    wrote_agents, msg_agents, _content = generate_agents_md(root, techs, cfg, force=True)
-    if msg_agents:
-        lines.append("notice: %s" % msg_agents)
     # Apply context budget filtering for display.
     selected_records = [rec_map[sid] for sid in sel if sid in rec_map]
     filtered_records, skipped, total_tokens, _ = apply_context_budget(
         selected_records, sel, techs, cfg,
     )
     # Derive display agent_ids from the filtered set so output matches rules.
-    filtered_ids = [(r.get("agent_id") or {}).get("opencode") or r["dir_name"] for r in filtered_records]
+    try:
+        filtered_ids = permission_ids_for_records(filtered_records, "opencode")
+    except ValueError as e:
+        return 1, str(e)
     rules = _permission_rules(filtered_ids)
     oc_path = root / "opencode.json"
     oc_jsonc = root / "opencode.jsonc"
@@ -155,11 +199,7 @@ def plan(cfg):
         lines.append("Skills excluded by budget: %d" % skipped)
     lines.append("OpenCode agent_ids: %s" % (", ".join(filtered_ids) if filtered_ids else "(none)"))
     lines.append("Permission rules to apply (filtered set):")
-    for r in rules:
-        lines.append("  %s" % json.dumps(r))
-    lines.append("Policy rules to apply (removes denied skills from catalog):")
-    for r in _policy_rules(filtered_ids):
-        lines.append("  %s" % json.dumps(r))
+    lines.append("  %s" % json.dumps({"permission": {"skill": rules}}))
     if oc_path.exists():
         lines.append("Existing opencode.json will be preserved (unrelated settings kept).")
     else:
@@ -184,6 +224,16 @@ def validate(cfg):
         data = _load_json(oc_path)
     except (OSError, ValueError) as e:
         return 1, "invalid JSON: %s" % e
+    permission = data.get("permission", {})
+    if not isinstance(permission, dict):
+        return 1, "OpenCode permission config must be an object"
+    skill_rules = permission.get("skill", {})
+    if not isinstance(skill_rules, dict):
+        return 1, "OpenCode permission.skill config must be an object"
+    try:
+        _load_owned_rules(_sidecar_path(oc_path))
+    except (OSError, ValueError) as e:
+        return 1, "invalid OpenCode owned-rules sidecar: %s" % e
     msgs.append("opencode.json valid JSON")
     man, errs = load_manifest(root)
     if errs:
@@ -213,19 +263,24 @@ def apply(cfg, dry_run=False, yes=False):
         return 1, str(e)
     # Detect technologies for relevance-based budget filtering.
     techs = detect_technologies(root)
-    # Regenerate project AGENTS.md (apply refreshes it).
+    # Compute the managed instructions without writing before the dry-run and
+    # confirmation gates.
     from agent_skills.cli import generate_agents_md
-    wrote_agents, msg_agents, _content = generate_agents_md(root, techs, cfg, force=True)
-    if msg_agents:
-        print("notice: %s" % msg_agents)
+    wrote_agents, msg_agents, agents_md_content = generate_agents_md(
+        root, techs, cfg, write=False,
+    )
+    if agents_md_content is None:
+        return 1, msg_agents
     # Apply context budget filtering: only allow rules for skills that fit in context.
     selected_records = [rec_map[sid] for sid in sel if sid in rec_map]
     filtered_records, skipped, _, _ = apply_context_budget(
         selected_records, sel, techs, cfg,
     )
-    filtered_ids = [(r.get("agent_id") or {}).get("opencode") or r["dir_name"] for r in filtered_records]
+    try:
+        filtered_ids = permission_ids_for_records(filtered_records, "opencode")
+    except ValueError as e:
+        return 1, str(e)
     rules = _permission_rules(filtered_ids)
-    policies = _policy_rules(filtered_ids)
 
     existing = {}
     if oc_path.exists():
@@ -233,13 +288,29 @@ def apply(cfg, dry_run=False, yes=False):
             existing = _load_json(oc_path)
         except (OSError, ValueError) as e:
             return 1, "invalid existing JSON: %s" % e
-
-    new_config = _apply_rules_to_config(existing, rules, policies)
+    sidecar = _sidecar_path(oc_path)
+    try:
+        owned_rules = _load_owned_rules(sidecar)
+        new_config, new_owned_rules, rule_warnings = _apply_rules_to_config(
+            existing, rules, owned_rules,
+        )
+    except (OSError, ValueError) as e:
+        return 1, "unable to prepare OpenCode config: %s" % e
+    legacy_migration = any(
+        isinstance(existing.get(key), list)
+        and any(
+            isinstance(rule, dict) and rule.get("source") == "agent-skills-manager"
+            for rule in existing[key]
+        )
+        for key in ("permissions", "policies")
+    )
 
     if dry_run:
         msg = "would write %s with %d permission rules" % (oc_path, len(rules))
         if skipped:
             msg += " (%d skills excluded by context budget)" % skipped
+        if rule_warnings:
+            msg += "\n" + "\n".join("notice: " + warning for warning in rule_warnings)
         return 0, msg
 
     # Confirm.
@@ -250,26 +321,36 @@ def apply(cfg, dry_run=False, yes=False):
         if ans not in ("y", "yes"):
             return 0, "aborted"
 
-    # Atomic write.
-    import tempfile
-    tmp = oc_path.with_suffix(oc_path.suffix + ".tmp")
-    with tmp.open("w", encoding="utf-8") as f:
-        json.dump(new_config, f, indent=2)
-        f.write("\n")
-    # Validate JSON round-trip.
-    with tmp.open("r", encoding="utf-8") as f:
-        json.load(f)
-    os.replace(tmp, oc_path)
+    try:
+        if (
+            legacy_migration
+            and owned_rules.get("schema_version") != 1
+            and oc_path.exists()
+        ):
+            backup = backup_config_file(root, oc_path, "opencode.json")
+            print("backed up legacy OpenCode config: %s" % backup)
+    except OSError as e:
+        return 1, "unable to back up legacy OpenCode config: %s" % e
 
-    # Sidecar owned rules.
-    sidecar = _sidecar_path(oc_path)
-    sidecar.parent.mkdir(parents=True, exist_ok=True)
-    with sidecar.open("w", encoding="utf-8") as f:
-        json.dump({"rules": rules, "policies": policies}, f, indent=2)
-        f.write("\n")
+    wrote_agents, msg_agents, agents_md_content = generate_agents_md(root, techs, cfg)
+    if msg_agents:
+        print("notice: %s" % msg_agents)
+    if agents_md_content is None:
+        return 1, msg_agents
 
-    return 0, "applied: %s (%d permission rules%s)" % (
-        oc_path, len(rules), " (%d skills excluded by context budget)" % skipped if skipped else "")
+    try:
+        write_json_atomic(oc_path, new_config)
+        write_json_atomic(sidecar, new_owned_rules)
+    except (OSError, ValueError) as e:
+        return 1, "failed to write OpenCode config: %s" % e
+
+    msg = "applied: %s (%d permission rules%s)" % (
+        oc_path, len(rules),
+        " (%d skills excluded by context budget)" % skipped if skipped else "",
+    )
+    if rule_warnings:
+        msg += "\n" + "\n".join("notice: " + warning for warning in rule_warnings)
+    return 0, msg
 
 
 def run(cfg, extra=None):

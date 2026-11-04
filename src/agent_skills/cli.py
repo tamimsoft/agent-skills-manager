@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from agent_skills import __version__
+from agent_skills.agents_md import generate_agents_md, extract_agents_block
 from agent_skills.config import load_config, resolve_library_root, default_config
 from agent_skills.discovery import discover_skills, DiscoveryError
 from agent_skills.manifest import (
@@ -15,7 +16,8 @@ from agent_skills.manifest import (
 from agent_skills.project import find_project_root
 from agent_skills.detection import detect_technologies
 from agent_skills.recommend import recommend, filter_skills_for_context
-from agent_skills.links import generate_project_skills_dir, read_marker
+from agent_skills.links import OWNED_RULES_FILENAME, read_marker
+from agent_skills.adapter_common import build_skill_entry, build_skills_dir_atomic
 from agent_skills.lock import AdvisoryLock, LockError
 from agent_skills import identity
 from agent_skills.resolution import resolve_resolutions, resolution_summary
@@ -26,8 +28,11 @@ def _build_parser():
     parser.add_argument("--version", action="version", version="agent-skills %s" % __version__)
     parser.add_argument("--json", action="store_true", help="machine-readable output")
     parser.add_argument("--no-cache", action="store_true", help="bypass discovery cache")
-    parser.add_argument("--yes", action="store_true", help="accept confirmations")
-    parser.add_argument("--dry-run", action="store_true", help="show changes, change nothing")
+    confirm_flags = argparse.ArgumentParser(add_help=False)
+    confirm_flags.add_argument("--yes", action="store_true", help="accept confirmations")
+    confirm_flags.add_argument("--dry-run", action="store_true", help="show changes, change nothing")
+    dry_run_flags = argparse.ArgumentParser(add_help=False)
+    dry_run_flags.add_argument("--dry-run", action="store_true", help="show changes, change nothing")
 
     sub = parser.add_subparsers(dest="command")
 
@@ -40,28 +45,24 @@ def _build_parser():
     p.add_argument("--no-cache", action="store_true", dest="no_cache")
 
     # init
-    p = sub.add_parser("init", help="create manifest with empty selection")
+    p = sub.add_parser("init", help="create manifest with empty selection", parents=[confirm_flags])
     p.add_argument("--name", default=None)
     p.add_argument("--interactive", action="store_true", help="run interactive selection after detection")
-    p.add_argument("--yes", action="store_true", help="accept confirmations")
 
     # select
-    p = sub.add_parser("select", help="interactively select skills from recommendations")
+    p = sub.add_parser("select", help="interactively select skills from recommendations", parents=[confirm_flags])
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--all", action="store_true")
     p.add_argument("--filter", default="")
     p.add_argument("--tech", default="")
-    p.add_argument("--dry-run", action="store_true", dest="dry_run")
 
     # add
-    p = sub.add_parser("add", help="add skills by dir_name")
+    p = sub.add_parser("add", help="add skills by dir_name", parents=[confirm_flags])
     p.add_argument("skills", nargs="+")
-    p.add_argument("--dry-run", action="store_true", dest="dry_run")
 
     # remove
-    p = sub.add_parser("remove", help="remove skills from manifest")
+    p = sub.add_parser("remove", help="remove skills from manifest", parents=[confirm_flags])
     p.add_argument("skills", nargs="+")
-    p.add_argument("--dry-run", action="store_true", dest="dry_run")
 
     # detect
     sub.add_parser("detect", help="show detected technologies")
@@ -75,38 +76,33 @@ def _build_parser():
     sub.add_parser("validate", help="validate config, manifest, library")
 
     # sync
-    p = sub.add_parser("sync", help="regenerate generated state from manifest")
-    p.add_argument("--dry-run", action="store_true", dest="dry_run")
+    p = sub.add_parser("sync", help="regenerate generated state from manifest", parents=[dry_run_flags])
 
     # doctor
     sub.add_parser("doctor", help="environment checks")
 
     # clean
-    p = sub.add_parser("clean", help="remove orphaned generated directories")
-    p.add_argument("--dry-run", action="store_true", dest="dry_run")
+    p = sub.add_parser("clean", help="remove orphaned generated directories", parents=[confirm_flags])
 
     # junie
-    p = sub.add_parser("junie", help="launch Junie with managed skills")
+    p = sub.add_parser("junie", help="launch Junie with managed skills", parents=[dry_run_flags])
     p.add_argument("--prepare", action="store_true")
-    p.add_argument("--dry-run", action="store_true", dest="dry_run")
     p.add_argument("args", nargs=argparse.REMAINDER)
 
     # kilo
     p = sub.add_parser("kilo", help="Kilo subcommands")
-    p.add_argument("--dry-run", action="store_true", dest="dry_run")
-    p.add_argument("--yes", action="store_true")
     sp = p.add_subparsers(dest="kilo_sub")
     for name in ("plan", "apply", "validate", "run"):
-        subp = sp.add_parser(name, help="%s Kilo config" % name)
-        subp.add_argument("--dry-run", action="store_true", dest="dry_run")
+        parents = [confirm_flags] if name in ("apply", "run") else []
+        subp = sp.add_parser(name, help="%s Kilo config" % name, parents=parents)
         subp.add_argument("args", nargs=argparse.REMAINDER)
 
     # opencode
     p = sub.add_parser("opencode", help="OpenCode subcommands")
     sp = p.add_subparsers(dest="oc_sub")
     for name in ("plan", "apply", "validate", "run"):
-        subp = sp.add_parser(name, help="%s OpenCode config" % name)
-        subp.add_argument("--dry-run", action="store_true", dest="dry_run")
+        parents = [confirm_flags] if name == "apply" else [dry_run_flags] if name == "run" else []
+        subp = sp.add_parser(name, help="%s OpenCode config" % name, parents=parents)
         subp.add_argument("args", nargs=argparse.REMAINDER)
 
     return parser
@@ -561,7 +557,10 @@ def cmd_select(args, cfg):
         print("error: %s" % e, file=sys.stderr)
         return 1
     techs = detect_technologies(root)
-    library_root, records, warnings, errors = _discover(cfg, no_cache=getattr(args, "no_cache", False))
+    library_root, records, warnings, errors = _discover(
+        cfg,
+        no_cache=getattr(args, "dry_run", False) or getattr(args, "no_cache", False),
+    )
     if errors:
         for e in errors:
             print("error: %s" % e, file=sys.stderr)
@@ -597,126 +596,6 @@ def cmd_select(args, cfg):
     return 0
 
 
-TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
-GLOBAL_TEMPLATES_DIR = Path.home() / ".config" / "agent-skills" / "templates"
-BASE_TEMPLATE_FILENAME = "AGENTS.base.md"
-
-
-def _global_template_path():
-    return GLOBAL_TEMPLATES_DIR / BASE_TEMPLATE_FILENAME
-
-
-def ensure_global_template():
-    """Ensure the global AGENTS.base.md template exists in the user config dir.
-
-    Copies the bundled default template if the global one is missing.
-    Returns the path to the (existing or newly created) global template.
-    """
-    global_tpl = _global_template_path()
-    if not global_tpl.exists():
-        try:
-            GLOBAL_TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
-            bundled = TEMPLATES_DIR / BASE_TEMPLATE_FILENAME
-            if bundled.exists():
-                import shutil
-                shutil.copy2(str(bundled), str(global_tpl))
-        except OSError:
-            pass
-    return global_tpl
-
-
-def _tech_section(tech):
-    """Return a short AGENTS.md section for a detected technology."""
-    name = tech.get("name", "unknown")
-    evidence = ", ".join(e.get("file", "") for e in tech.get("evidence", []))
-    return "### %s\nDetected via: %s\n" % (name, evidence)
-
-
-def _is_test_mode():
-    """True when running under tests or with env overrides."""
-    if os.environ.get("AGENT_SKILLS_HOME"):
-        return True
-    # Avoid side effects (immutable flags) during unit test runs.
-    if "unittest" in sys.modules or "pytest" in sys.modules:
-        return True
-    return False
-
-
-def _set_immutable(path, on):
-    """Best-effort: mark path immutable (on=True) or mutable (on=False).
-
-    Protects AGENTS.md from being clobbered by an agent's own /init command.
-    macOS: chflags uchg/nouchg. Linux: chattr +i/-i (may require privileges).
-    No-op in test mode or on unsupported platforms.
-    """
-    if _is_test_mode():
-        return
-    p = str(path)
-    try:
-        if sys.platform == "darwin":
-            import subprocess
-            flag = "uchg" if on else "nouchg"
-            subprocess.run(["chflags", flag, p], check=False,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        elif sys.platform.startswith("linux"):
-            import subprocess
-            flag = "+i" if on else "-i"
-            subprocess.run(["chattr", flag, p], check=False,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception:
-        pass
-
-
-def generate_agents_md(root, techs, cfg, force=False, write=True):
-    """Generate project AGENTS.md from the global base template + tech sections.
-
-    By default never overwrites an existing AGENTS.md (safe merge for init).
-    With force=True, overwrites (used by sync and managed launches).
-    With write=False, computes content without writing to disk (used by validate).
-    Returns (wrote, message, content) where content is the generated text.
-    """
-    agents_md = root / "AGENTS.md"
-    if agents_md.exists() and not force:
-        try:
-            existing = agents_md.read_text(encoding="utf-8")
-        except OSError:
-            existing = None
-        return False, "AGENTS.md already exists at %s; not overwritten. Merge manually or delete and re-run init." % agents_md, existing
-
-    # If we are about to overwrite, clear any immutable flag first.
-    if agents_md.exists() and force:
-        _set_immutable(agents_md, False)
-
-    global_tpl = ensure_global_template()
-    parts = []
-    if global_tpl.exists():
-        try:
-            parts.append(global_tpl.read_text(encoding="utf-8"))
-        except OSError:
-            parts.append("# Agent Instructions\n\n(No base template available.)\n")
-    else:
-        parts.append("# Agent Instructions\n\n(No base template available.)\n")
-
-    if techs:
-        parts.append("\n## Project-specific technology guidance\n")
-        for t in techs:
-            parts.append(_tech_section(t))
-
-    parts.append("\n## Agent skills\nSee .agents/skills.json for the selected skill set.\n")
-
-    content = "\n".join(parts)
-    if write:
-        try:
-            agents_md.write_text(content, encoding="utf-8")
-            # Protect from being clobbered by an agent's own /init command.
-            _set_immutable(agents_md, True)
-            return True, "Generated AGENTS.md at %s" % agents_md, content
-        except OSError as e:
-            return False, "Failed to write AGENTS.md: %s" % e, None
-    else:
-        return False, "AGENTS.md content computed (not written).", content
-
-
 def cmd_init(args, cfg):
     try:
         root = find_project_root(for_init=True)
@@ -732,8 +611,11 @@ def cmd_init(args, cfg):
     # detect
     techs = detect_technologies(root)
     recs_list = []
+    dry_run = getattr(args, "dry_run", False)
     try:
-        library_root, records, warnings, errors = _discover(cfg, no_cache=False)
+        library_root, records, warnings, errors = _discover(
+            cfg, no_cache=dry_run,
+        )
         recs = recommend(records, techs, limit=20)
         recs_list = [{"dir_name": r["record"]["dir_name"], "score": r["score"], "reasons": r["reasons"]} for r in recs]
     except Exception as e:
@@ -745,6 +627,17 @@ def cmd_init(args, cfg):
     print("\nRecommended skills (not auto-selected):")
     for r in recs_list:
         print("  - %s (score=%d): %s" % (r["dir_name"], r["score"], "; ".join(r["reasons"])))
+    if dry_run:
+        if not mp.exists():
+            print("would create manifest: %s" % mp)
+        else:
+            print("manifest already exists: %s" % mp)
+        _, msg, content = generate_agents_md(root, techs, cfg, write=False)
+        if content is None:
+            print("error: %s" % msg, file=sys.stderr)
+            return 1
+        print("would update managed AGENTS.md block")
+        return 0
     if getattr(args, "interactive", False) and (sys.stdin.isatty() or getattr(args, "yes", False)):
         chosen = interactive_select(records, techs, limit=20)
         if chosen:
@@ -756,9 +649,6 @@ def cmd_init(args, cfg):
             if _confirm("Create manifest with selection %s?" % ", ".join(chosen), getattr(args, "yes", False)):
                 save_manifest(root, man)
                 print("Created %s" % mp)
-                wrote, msg, _content = generate_agents_md(root, techs, cfg)
-                print(msg)
-                return 0
     if not mp.exists():
         if not _confirm("Create manifest with empty selection?", getattr(args, "yes", False)):
             if not sys.stdin.isatty() and not getattr(args, "yes", False):
@@ -767,11 +657,9 @@ def cmd_init(args, cfg):
             return 0
         save_manifest(root, man)
         print("Created %s" % mp)
-        wrote, msg, _content = generate_agents_md(root, techs, cfg)
-        print(msg)
     wrote, msg, _content = generate_agents_md(root, techs, cfg)
     print(msg)
-    return 0
+    return 0 if _content is not None else 1
 
 
 def cmd_add(args, cfg):
@@ -784,7 +672,9 @@ def cmd_add(args, cfg):
     if man is None:
         print("error: %s" % "; ".join(errs), file=sys.stderr)
         return 1
-    library_root, records, warnings, errors = _discover(cfg, no_cache=False)
+    library_root, records, warnings, errors = _discover(
+        cfg, no_cache=getattr(args, "dry_run", False),
+    )
     known = {r["dir_name"]: r for r in records}
     sel = selected_ids(man)
     for sid in args.skills:
@@ -920,22 +810,37 @@ def cmd_validate(args, cfg):
             print("\nPer-agent resolution:")
             print(resolution_summary(res))
 
-            # AGENTS.md hard enforcement: project AGENTS.md must exist and be current.
+            # Validate only the manager-owned block; validation must not write.
             agents_md_path = root / "AGENTS.md"
             if not agents_md_path.is_file():
                 ok = False
                 print("AGENTS.md missing: run 'agent-skills init' or 'agent-skills sync' to generate.")
             else:
                 techs = detect_technologies(root)
-                wrote, msg, expected = generate_agents_md(root, techs, cfg, force=False, write=False)
                 try:
                     existing = agents_md_path.read_text(encoding="utf-8")
+                    _, msg, expected_content = generate_agents_md(
+                        root, techs, cfg, write=False,
+                    )
+                    if expected_content is None:
+                        raise ValueError(msg)
+                    expected = extract_agents_block(expected_content)
+                    actual = extract_agents_block(existing)
                 except OSError:
-                    existing = None
-                if expected is not None and existing != expected:
+                    ok = False
+                    expected = None
+                    actual = None
+                    print("AGENTS.md error: unable to read file")
+                except ValueError as e:
+                    ok = False
+                    print("AGENTS.md error: %s" % e)
+                    expected = None
+                    actual = None
+                if expected is not None and actual != expected:
                     ok = False
                     print("AGENTS.md stale: regenerate with 'agent-skills sync'.")
     except ValueError as e:
+        ok = False
         print("no project root: %s" % e)
     return 0 if ok else 3
 
@@ -951,7 +856,9 @@ def cmd_sync(args, cfg):
         print("error: %s" % "; ".join(errs), file=sys.stderr)
         return 1
     sel = selected_ids(man)
-    library_root, records, warnings, errors = _discover(cfg, no_cache=False)
+    library_root, records, warnings, errors = _discover(
+        cfg, no_cache=getattr(args, "dry_run", False),
+    )
     rec_map = {r["dir_name"]: r for r in records}
     selected_records = []
     for sid in sel:
@@ -962,10 +869,15 @@ def cmd_sync(args, cfg):
             return 1
     # Detect technologies for relevance-based budget filtering.
     techs = detect_technologies(root)
-    # Regenerate project AGENTS.md (force overwrite: sync refreshes it).
-    wrote_agents, msg_agents, agents_md_content = generate_agents_md(root, techs, cfg, force=True)
+    dry_run = args.dry_run
+    wrote_agents, msg_agents, agents_md_content = generate_agents_md(
+        root, techs, cfg, write=not dry_run,
+    )
     if msg_agents:
         print("notice: %s" % msg_agents)
+    if agents_md_content is None:
+        print("error: %s" % msg_agents, file=sys.stderr)
+        return 1
     # Context budget filtering: only generate skills that fit in context.
     filtered_records, skipped, total_tokens, cwarnings = filter_skills_for_context(
         selected_records, sel, techs,
@@ -983,7 +895,7 @@ def cmd_sync(args, cfg):
     import hashlib
     key = "%s-%s" % (root.name, hashlib.sha256(str(root.resolve()).encode()).hexdigest()[:12])
     gen_dir = Path(generated_root) / key
-    if getattr(args, "dry_run", False) or getattr(args, "dry-run", False):
+    if dry_run:
         print("would generate: %s with %d skills" % (gen_dir, len(filtered_records)))
         if agents_md_content:
             print("would write AGENTS.md into generated dir")
@@ -991,14 +903,22 @@ def cmd_sync(args, cfg):
     lock_path = Path(generated_root) / ".lock"
     try:
         with AdvisoryLock(lock_path):
-            generate_project_skills_dir(
-                gen_dir, filtered_records, library_root,
-                allowed_roots=cfg.get("allowed_roots", []) if isinstance(cfg, dict) else [],
-                project_key=key,
+            build_skills_dir_atomic(
+                parent=gen_dir.parent,
+                dest_dir=gen_dir,
+                records=filtered_records,
+                agent_name="manager",
+                key=key,
+                build_entry_fn=build_skill_entry,
+                tmp_prefix=".gen-tmp-",
                 agents_md_content=agents_md_content,
+                owned_rules_filename=OWNED_RULES_FILENAME,
             )
     except LockError as e:
         print("error: %s" % e, file=sys.stderr)
+        return 1
+    except (OSError, RuntimeError) as e:
+        print("error: failed to generate project skills: %s" % e, file=sys.stderr)
         return 1
     print("generated: %s" % gen_dir)
     return 0
@@ -1085,7 +1005,7 @@ def cmd_clean(args, cfg):
         if prefix and _project_root_exists_for_prefix(prefix):
             continue  # project root still exists; not an orphan
         orphans.append(d)
-    dry = getattr(args, "dry_run", False) or getattr(args, "dry-run", False)
+    dry = args.dry_run
     for d in orphans:
         if dry:
             print("would remove: %s" % d)

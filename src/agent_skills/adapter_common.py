@@ -9,11 +9,45 @@ import json
 import os
 import shutil
 import tempfile
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from agent_skills.frontmatter import parse_frontmatter
 from agent_skills.links import MARKER_FILENAME
 from agent_skills.recommend import filter_skills_for_context
+
+
+def backup_config_file(root, path, prefix):
+    """Create a timestamped backup of a config before a one-time migration."""
+    root = Path(root)
+    path = Path(path)
+    backup_dir = root / ".agents" / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    backup = backup_dir / ("%s.%s" % (prefix, stamp))
+    shutil.copy2(str(path), str(backup))
+    return backup
+
+
+def write_json_atomic(path, data):
+    """Write JSON through a same-directory temporary file and atomic replace."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=".%s-" % path.name, dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(data, stream, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp_name, path)
+    except Exception:
+        try:
+            os.unlink(temp_name)
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def build_wrapper(src_root, dest_root, rec):
@@ -159,6 +193,40 @@ def build_skill_entry(src_root, dest_root, rec):
         return []
 
 
+def build_skill_copy(src_root, dest_root, rec):
+    """Copy one selected skill, rejecting bundle links that escape its root."""
+    src_root = Path(src_root).resolve()
+    dest_entry = Path(dest_root) / rec["dir_name"]
+
+    def copy_item(source, destination, ancestors):
+        try:
+            resolved = source.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise RuntimeError("cannot resolve skill content %s: %s" % (source, exc))
+        try:
+            resolved.relative_to(src_root)
+        except ValueError:
+            raise RuntimeError("skill content symlink escapes skill root: %s" % source)
+
+        if resolved.is_dir():
+            if resolved in ancestors:
+                raise RuntimeError("skill content contains a directory cycle: %s" % source)
+            destination.mkdir(parents=True, exist_ok=True)
+            next_ancestors = ancestors | {resolved}
+            for child in sorted(resolved.iterdir()):
+                if child.name == ".DS_Store" or child.name.startswith("._"):
+                    continue
+                copy_item(child, destination / child.name, next_ancestors)
+        elif resolved.is_file():
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(resolved), str(destination))
+        else:
+            raise RuntimeError("unsupported skill content type: %s" % source)
+
+    copy_item(src_root, dest_entry, set())
+    return []
+
+
 def apply_context_budget(selected_records, sel, techs, cfg):
     """Apply context budget filtering with common defaults.
 
@@ -174,7 +242,7 @@ def apply_context_budget(selected_records, sel, techs, cfg):
 def build_skills_dir_atomic(parent, dest_dir, records, agent_name, key,
                             build_entry_fn, tmp_prefix=".gen-tmp-",
                             marker_filename=None, extra_marker_fields=None,
-                            agents_md_content=None):
+                            agents_md_content=None, owned_rules_filename=None):
     """Build-then-swap crash recovery pattern (§5.5).
 
     Builds skill entries in a temp sibling directory under `parent`, writes
@@ -183,32 +251,94 @@ def build_skills_dir_atomic(parent, dest_dir, records, agent_name, key,
     lock before invoking this.
     """
     parent.mkdir(parents=True, exist_ok=True)
-    # Clean up leftover .tmp-* / .old-* from a crashed run.
-    base_prefix = tmp_prefix.rstrip("-")
+    parent = Path(parent)
+    dest_dir = Path(dest_dir)
+    old_prefix = tmp_prefix + "old-"
+    legacy_old_prefix = tmp_prefix.rstrip("-") + ".old-"
+    marker_path = Path(marker_filename) if marker_filename else Path(MARKER_FILENAME)
+    build_marker_name = ".agent-skills-build.json"
+
+    def remove_path(path):
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        elif path.exists() or path.is_symlink():
+            path.unlink()
+
+    def valid_managed_tree(path):
+        if not path.is_dir() or path.is_symlink():
+            return False
+        try:
+            with (path / marker_path).open("r", encoding="utf-8") as stream:
+                marker = json.load(stream)
+        except (OSError, ValueError):
+            return False
+        return (
+            isinstance(marker, dict)
+            and marker.get("schema_version") == 1
+            and marker.get("project_key") == key
+            and marker.get("agent") in (agent_name, None)
+            and isinstance(marker.get("managed_entries"), list)
+        )
+
+    def valid_build_temp(path):
+        if not path.is_dir() or path.is_symlink():
+            return False
+        try:
+            with (path / build_marker_name).open("r", encoding="utf-8") as stream:
+                marker = json.load(stream)
+        except (OSError, ValueError):
+            return False
+        return (
+            isinstance(marker, dict)
+            and marker.get("project_key") == key
+            and marker.get("agent") == agent_name
+        )
+
+    # Remove only abandoned build directories. Restore a marked old tree first
+    # if a prior process crashed after moving the destination aside.
     for entry in os.listdir(parent):
-        name = entry
-        if name.startswith(base_prefix + "-tmp-") or name.startswith(base_prefix + "-old-"):
-            leftover = parent / name
-            if leftover.is_dir() and not leftover.is_symlink():
-                shutil.rmtree(leftover, ignore_errors=True)
-            else:
-                try:
-                    leftover.unlink()
-                except OSError:
-                    pass
+        path = parent / entry
+        if (
+            entry.startswith(tmp_prefix)
+            and not entry.startswith(old_prefix)
+            and not entry.startswith(legacy_old_prefix)
+        ) and valid_build_temp(path):
+            remove_path(path)
+
+    old_dirs = sorted(
+        (
+            parent / name for name in os.listdir(parent)
+            if name.startswith(old_prefix) or name.startswith(legacy_old_prefix)
+        ),
+        key=lambda path: path.stat().st_mtime_ns if path.exists() else 0,
+        reverse=True,
+    )
+    if not dest_dir.exists() and not dest_dir.is_symlink():
+        recovery = next((path for path in old_dirs if valid_managed_tree(path)), None)
+        if recovery is not None:
+            os.replace(recovery, dest_dir)
+
     tmp = Path(tempfile.mkdtemp(prefix=tmp_prefix, dir=str(parent)))
     try:
+        with (tmp / build_marker_name).open("w", encoding="utf-8") as stream:
+            json.dump({"project_key": key, "agent": agent_name}, stream)
+
         managed_entries = []
         for rec in records:
             # rec["real_path"] is the skill directory; use it directly as src_root.
             src_root = Path(rec["real_path"])
-            dest_entry = tmp / rec["dir_name"]
             linked = build_entry_fn(src_root, tmp, rec)
             if linked:
                 for l in linked:
                     managed_entries.append("%s/%s" % (rec["dir_name"], l))
             else:
                 managed_entries.append(rec["dir_name"])
+
+        if agents_md_content is not None:
+            with (tmp / "AGENTS.md").open("w", encoding="utf-8") as f:
+                f.write(agents_md_content)
+                f.write("\n")
+            managed_entries.append("AGENTS.md")
 
         marker = {
             "manager_version": "0.1.0",
@@ -219,38 +349,52 @@ def build_skills_dir_atomic(parent, dest_dir, records, agent_name, key,
         }
         if extra_marker_fields:
             marker.update(extra_marker_fields)
-        mk_path = Path(marker_filename) if marker_filename else Path(MARKER_FILENAME)
-        with (tmp / mk_path).open("w", encoding="utf-8") as f:
+        with (tmp / marker_path).open("w", encoding="utf-8") as f:
             json.dump(marker, f, indent=2)
             f.write("\n")
-
-        # Write AGENTS.md into the generated dir so agents see global rules in context.
-        if agents_md_content is not None:
-            with (tmp / "AGENTS.md").open("w", encoding="utf-8") as f:
-                f.write(agents_md_content)
+        if owned_rules_filename:
+            owned_rules = {
+                "schema_version": 1,
+                "project_key": key,
+                "managed_entries": managed_entries,
+            }
+            with (tmp / owned_rules_filename).open("w", encoding="utf-8") as f:
+                json.dump(owned_rules, f, indent=2)
                 f.write("\n")
-            managed_entries.append("AGENTS.md")
-
         # Verify symlinks resolve.
         for name in managed_entries:
             link = tmp / name
-            if not link.exists():
-                if link.is_file():
-                    continue  # AGENTS.md is a regular file, not a symlink
+            if link.is_symlink():
+                if not link.exists():
+                    raise RuntimeError("broken generated link: %s" % link)
+            elif link.is_file():
+                continue
+            elif link.is_dir():
+                continue
+            else:
                 raise RuntimeError("broken generated link: %s" % link)
 
-        # Build-then-swap: rename old aside, move tmp into place, remove old.
-        old_aside = parent / (base_prefix + ".old-%d" % os.getpid())
+        old_aside = parent / (old_prefix + uuid.uuid4().hex)
         if dest_dir.exists() or dest_dir.is_symlink():
-            if dest_dir.is_dir() and not dest_dir.is_symlink():
-                os.rename(str(dest_dir), str(old_aside))
-            else:
-                dest_dir.unlink()
-        os.replace(tmp, dest_dir)
+            if not valid_managed_tree(dest_dir):
+                raise RuntimeError(
+                    "refusing to replace unmarked generated directory: %s" % dest_dir
+                )
+            os.replace(dest_dir, old_aside)
+        try:
+            os.replace(tmp, dest_dir)
+        except OSError:
+            if old_aside.exists() and not dest_dir.exists():
+                os.replace(old_aside, dest_dir)
+            raise
         tmp = None
+        (dest_dir / build_marker_name).unlink()
 
         if old_aside.exists():
-            shutil.rmtree(old_aside, ignore_errors=True)
+            remove_path(old_aside)
+        for stale_old in old_dirs:
+            if stale_old.exists() and valid_managed_tree(stale_old):
+                remove_path(stale_old)
 
     finally:
         if tmp is not None and Path(tmp).exists():

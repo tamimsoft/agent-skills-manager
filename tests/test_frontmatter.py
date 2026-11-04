@@ -32,6 +32,23 @@ class TestFrontmatter(unittest.TestCase):
         self.assertEqual(r["data"]["name"], "foo:bar")
         self.assertEqual(r["data"]["description"], "it works")
 
+    def test_bom_before_frontmatter(self):
+        r = parse_frontmatter("\ufeff---\nname: foo\ndescription: bar\n---\n")
+        self.assertEqual(r["status"], "valid")
+        self.assertEqual(r["data"]["name"], "foo")
+
+    def test_hash_inside_quoted_value_is_not_a_comment(self):
+        r = parse_frontmatter(
+            '---\nname: "foo"\ndescription: "a # value" # trailing comment\n---\n'
+        )
+        self.assertEqual(r["data"]["description"], "a # value")
+
+    def test_multiline_plain_scalar_is_folded(self):
+        r = parse_frontmatter(
+            "---\nname: foo\ndescription: first line\n  second line\n---\n"
+        )
+        self.assertEqual(r["data"]["description"], "first line second line")
+
     def test_block_scalar_folded(self):
         text = "---\ndescription: >\n  line one\n  line two\n---\n"
         r = parse_frontmatter(text)
@@ -54,7 +71,7 @@ class TestFrontmatter(unittest.TestCase):
         self.assertEqual(r["data"]["description"], "http://example.com:8080/path")
 
     def test_unsupported_construct_warning(self):
-        text = "---\nname: foo\ndescription: bar\n  bad indent\n---\n"
+        text = "---\nname: foo\ndescription: bar\nbad key: value\n---\n"
         r = parse_frontmatter(text)
         self.assertTrue(any("unsupported-yaml" in w for w in r["warnings"]))
 

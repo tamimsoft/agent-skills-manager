@@ -19,9 +19,24 @@ SUPPORTED_SCALARS = ("str", "block")
 
 
 def _strip_comment(value):
-    # Remove a trailing comment only when preceded by whitespace.
-    if " #" in value:
-        value = value.split(" #", 1)[0]
+    quote = None
+    escaped = False
+    for index, char in enumerate(value):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and quote == '"':
+            escaped = True
+            continue
+        if quote:
+            if char == quote:
+                quote = None
+            continue
+        if index == 0 and char in ("'", '"'):
+            quote = char
+        elif char == "#" and index > 0 and value[index - 1].isspace():
+            value = value[:index]
+            break
     return value.rstrip()
 
 
@@ -51,6 +66,7 @@ def parse_frontmatter(text):
     """
     result = {"status": "missing", "data": {}, "warnings": [], "error": None}
 
+    text = text.lstrip("\ufeff")
     if not text.startswith("---"):
         return result
 
@@ -119,8 +135,31 @@ def parse_frontmatter(text):
             continue
 
         value = _strip_comment(value)
-        data[key] = _parse_scalar(value)
+        scalar = _parse_scalar(value)
         i += 1
+        if value and not value.startswith(("'", '"')):
+            folded_lines = []
+            while i < n:
+                continuation = body_lines[i]
+                if continuation.strip() == "":
+                    if i + 1 < n and body_lines[i + 1].startswith((" ", "\t")):
+                        folded_lines.append("")
+                        i += 1
+                        continue
+                    break
+                if not continuation.startswith((" ", "\t")):
+                    break
+                folded_lines.append(continuation.strip())
+                i += 1
+            if folded_lines:
+                pieces = [str(scalar)] if scalar is not None else []
+                for continuation in folded_lines:
+                    if continuation:
+                        pieces.append(continuation)
+                    elif pieces:
+                        pieces.append("\n")
+                scalar = " ".join(pieces).replace(" \n ", "\n").replace("\n ", "\n").strip()
+        data[key] = scalar
 
     # Determine status
     result["data"] = data
