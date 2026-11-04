@@ -632,6 +632,41 @@ def _tech_section(tech):
     return "### %s\nDetected via: %s\n" % (name, evidence)
 
 
+def _is_test_mode():
+    """True when running under tests or with env overrides."""
+    if os.environ.get("AGENT_SKILLS_HOME"):
+        return True
+    # Avoid side effects (immutable flags) during unit test runs.
+    if "unittest" in sys.modules or "pytest" in sys.modules:
+        return True
+    return False
+
+
+def _set_immutable(path, on):
+    """Best-effort: mark path immutable (on=True) or mutable (on=False).
+
+    Protects AGENTS.md from being clobbered by an agent's own /init command.
+    macOS: chflags uchg/nouchg. Linux: chattr +i/-i (may require privileges).
+    No-op in test mode or on unsupported platforms.
+    """
+    if _is_test_mode():
+        return
+    p = str(path)
+    try:
+        if sys.platform == "darwin":
+            import subprocess
+            flag = "uchg" if on else "nouchg"
+            subprocess.run(["chflags", flag, p], check=False,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        elif sys.platform.startswith("linux"):
+            import subprocess
+            flag = "+i" if on else "-i"
+            subprocess.run(["chattr", flag, p], check=False,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+
 def generate_agents_md(root, techs, cfg, force=False, write=True):
     """Generate project AGENTS.md from the global base template + tech sections.
 
@@ -647,6 +682,10 @@ def generate_agents_md(root, techs, cfg, force=False, write=True):
         except OSError:
             existing = None
         return False, "AGENTS.md already exists at %s; not overwritten. Merge manually or delete and re-run init." % agents_md, existing
+
+    # If we are about to overwrite, clear any immutable flag first.
+    if agents_md.exists() and force:
+        _set_immutable(agents_md, False)
 
     global_tpl = ensure_global_template()
     parts = []
@@ -669,6 +708,8 @@ def generate_agents_md(root, techs, cfg, force=False, write=True):
     if write:
         try:
             agents_md.write_text(content, encoding="utf-8")
+            # Protect from being clobbered by an agent's own /init command.
+            _set_immutable(agents_md, True)
             return True, "Generated AGENTS.md at %s" % agents_md, content
         except OSError as e:
             return False, "Failed to write AGENTS.md: %s" % e, None

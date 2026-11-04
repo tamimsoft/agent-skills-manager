@@ -132,6 +132,7 @@ Unlike a static `AGENTS.md` that agents can ignore, `agent-skills-manager` treat
 - **`init`** generates it once (safe merge — never overwrites an existing file).
 - **`sync`** and every managed launch (`junie`, `opencode apply|run`, `kilo apply|run`) regenerate it from the global rules template + your detected technologies.
 - **`validate`** fails (exit 3) if `AGENTS.md` is missing or stale.
+- **Protected from clobbering** — on macOS/Linux the generated `AGENTS.md` is marked immutable (best-effort) so an agent's own `/init` command cannot overwrite or delete it; `sync`/launches clear the flag before regenerating. To edit it manually, run `chflags nouchg AGENTS.md` (macOS) or `chattr -i AGENTS.md` (Linux).
 
 This keeps the global engineering rules in front of the agent on every session, and keeps them current as your stack evolves.
 
