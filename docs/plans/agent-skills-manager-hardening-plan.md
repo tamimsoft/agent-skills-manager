@@ -52,7 +52,7 @@ Implement the supplied eight-phase hardening proposal while preserving user-auth
    - Add console entry point and include `templates/*.md` in built distributions.
    - Correct README claims for Kilo discovery, AGENTS ownership, budget behavior, and test coverage; include migration notes.
    - Run all unit tests, wheel/install smoke test, CLI help/doctor, and disposable adapter tests. Review complete diff and update review/plan status.
-10. **Commit verified work** — `IN_PROGRESS`
+10. **Commit verified work** — `COMPLETED`
     - Commit only after all acceptance criteria pass and no unresolved blocking issues remain. Use a concise Conventional Commit message and required co-author trailer. Do not push.
 
 ## Verification record
@@ -64,6 +64,7 @@ Implement the supplied eight-phase hardening proposal while preserving user-auth
 - Disposable OpenCode 2.2.5 apply/migration and `debug config --standalone` confirmed parsed `permission.skill` wildcard-deny and explicit allow rules.
 - Disposable Kilo 7.8.18 checks confirmed copied project-selected skills are catalogued from `.kilo/skills/`. Kilo continues to catalogue global `~/.agents/skills/` entries, and `permission.skill` does not hide them. The adapter reports this limitation; no global library relocation was performed.
 - No files in the global skills library were changed.
+- Implementation commit: `cfe2200` (`fix: harden managed skill launches and config`); no push performed.
 
 ## Risks and rollback
 
