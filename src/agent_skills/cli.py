@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -11,7 +12,8 @@ from agent_skills.agents_md import generate_agents_md, extract_agents_block
 from agent_skills.config import load_config, resolve_library_root, default_config
 from agent_skills.discovery import discover_skills, DiscoveryError
 from agent_skills.manifest import (
-    manifest_path, load_manifest, save_manifest, default_manifest, selected_ids, validate_manifest,
+    manifest_path, load_manifest, save_manifest, default_manifest, selected_ids,
+    validate_manifest, agent_is_enabled,
 )
 from agent_skills.project import find_project_root
 from agent_skills.detection import detect_technologies
@@ -21,6 +23,12 @@ from agent_skills.adapter_common import build_skill_entry, build_skills_dir_atom
 from agent_skills.lock import AdvisoryLock, LockError
 from agent_skills import identity
 from agent_skills.resolution import resolve_resolutions, resolution_summary
+
+SUPPORTED_AGENTS = (
+    ("opencode", "OpenCode"),
+    ("junie", "Junie"),
+    ("kilo", "Kilo"),
+)
 
 
 def _build_parser():
@@ -45,9 +53,9 @@ def _build_parser():
     p.add_argument("--no-cache", action="store_true", dest="no_cache")
 
     # init
-    p = sub.add_parser("init", help="create manifest with empty selection", parents=[confirm_flags])
+    p = sub.add_parser("init", help="initialize project; use --interactive for guided setup", parents=[confirm_flags])
     p.add_argument("--name", default=None)
-    p.add_argument("--interactive", action="store_true", help="run interactive selection after detection")
+    p.add_argument("--interactive", action="store_true", help="choose agent targets and skills after detection")
 
     # select
     p = sub.add_parser("select", help="interactively select skills from recommendations", parents=[confirm_flags])
@@ -122,6 +130,56 @@ def _confirm(prompt, yes):
     except EOFError:
         return False
     return ans in ("y", "yes")
+
+
+def _configured_agent_command(cfg, agent_id):
+    paths = cfg.get("agent_paths", {}) if isinstance(cfg, dict) else {}
+    configured = paths.get(agent_id) if isinstance(paths, dict) else None
+    return configured if isinstance(configured, str) and configured else agent_id
+
+
+def _agent_availability(cfg, agent_id):
+    command = _configured_agent_command(cfg, agent_id)
+    return shutil.which(command)
+
+
+def interactive_select_agents(cfg, initial_selected=None):
+    """Toggle supported managed agents; return None if cancelled."""
+    chosen = set(initial_selected or ())
+    while True:
+        print("\nSupported agent targets (toggle numbers, Enter to confirm, 'q' to cancel):")
+        for index, (agent_id, label) in enumerate(SUPPORTED_AGENTS, 1):
+            executable = _agent_availability(cfg, agent_id)
+            availability = "available: %s" % executable if executable else (
+                "not found: %s" % _configured_agent_command(cfg, agent_id)
+            )
+            mark = "x" if agent_id in chosen else " "
+            print("  [%s] %d. %-10s %s" % (mark, index, label, availability))
+        try:
+            raw = input("> ").strip()
+        except EOFError:
+            return None
+        if raw.lower() in ("", "done", "ok"):
+            return [agent_id for agent_id, _ in SUPPORTED_AGENTS if agent_id in chosen]
+        if raw.lower() == "q":
+            return None
+        for token in raw.split():
+            try:
+                index = int(token)
+            except ValueError:
+                print("Enter one or more listed numbers, Enter to finish, or 'q' to cancel.")
+                break
+            if 1 <= index <= len(SUPPORTED_AGENTS):
+                agent_id = SUPPORTED_AGENTS[index - 1][0]
+                if agent_id in chosen:
+                    chosen.remove(agent_id)
+                else:
+                    chosen.add(agent_id)
+
+
+def _ensure_workflow_directories(root):
+    for relative in ("docs/plans", "docs/reviews"):
+        (Path(root) / relative).mkdir(parents=True, exist_ok=True)
 
 
 def _cfg_and_root(args, for_init=False):
@@ -224,9 +282,11 @@ def _curses_available():
         return False
 
 
-def _curses_select(recs, initial_chosen=None):
+def _curses_select(recs, initial_chosen=None, recommended_ids=None):
     import curses
     chosen = set(initial_chosen or set())
+    recommended_ids = set(recommended_ids or ())
+    cancelled = [False]
     idx = [0]
     page = [0]
     search = [""]
@@ -240,12 +300,16 @@ def _curses_select(recs, initial_chosen=None):
         s = search[0].lower()
         if _cached_filtered[0] is not None and _last_search[0] == s:
             return _cached_filtered[0]
-        if not s:
-            _cached_filtered[0] = recs
-        else:
+        if s:
             _cached_filtered[0] = [r for r in recs if s in (r["record"].get("dir_name") or "").lower()
                                    or s in (r["record"].get("declared_name") or "").lower()
                                    or s in (r["record"].get("description") or "").lower()]
+        else:
+            _cached_filtered[0] = [
+                r for r in recs
+                if r["record"].get("dir_name") in recommended_ids
+                or r["record"].get("dir_name") in chosen
+            ]
         _last_search[0] = s
         return _cached_filtered[0]
 
@@ -330,7 +394,7 @@ def _curses_select(recs, initial_chosen=None):
                 stdscr.attron(curses.color_pair(4) | curses.A_BOLD | curses.A_STANDOUT)
                 stdscr.addstr(search[0])
                 stdscr.attroff(curses.color_pair(4) | curses.A_BOLD | curses.A_STANDOUT)
-                stdscr.addstr("  (type to filter, Backspace clear)")
+                stdscr.addstr("  (recommendations shown; type to search all)")
             except curses.error:
                 pass
 
@@ -449,8 +513,8 @@ def _curses_select(recs, initial_chosen=None):
             elif key in (10, 13, curses.KEY_ENTER):
                 return
             elif key in (ord("q"), ord("Q"), 27):
-                chosen.clear()
-                return
+                cancelled[0] = True
+                return None
             elif key in (curses.KEY_BACKSPACE, 127, 8):
                 if search[0]:
                     search[0] = search[0][:-1]
@@ -462,6 +526,8 @@ def _curses_select(recs, initial_chosen=None):
                 idx[0] = 0
 
     curses.wrapper(draw)
+    if cancelled[0]:
+        return None
     return sorted(chosen)
 
 
@@ -493,19 +559,16 @@ def interactive_select(records, techs, limit=20, show_all=False, initial_selecte
             if t in haystack:
                 filtered.append(r)
         records = filtered
-    recs = recommend(records, techs, limit=limit, all_results=show_all)
-    rec_names = {r["record"]["dir_name"] for r in recs}
-    for r in records:
-        if r["dir_name"] in (initial_selected or set()) and r["dir_name"] not in rec_names:
-            recs.insert(0, {"record": r, "score": 0, "reasons": ["currently selected"]})
-    if not recs:
-        print("No recommendations.")
+    if not records:
+        print("No matching skills.")
         return []
-
     if _curses_available() and sys.stdin.isatty() and sys.stdout.isatty():
         try:
             from agent_skills.recommend import score_skill
             selected_set = set(initial_selected or set())
+            recommended = recommend(
+                records, techs, limit=limit, all_results=show_all,
+            )
             all_recs = []
             for r in records:
                 s, reasons = score_skill(r, techs)
@@ -518,24 +581,99 @@ def interactive_select(records, techs, limit=20, show_all=False, initial_selecte
                 -x["score"],
                 x["record"].get("dir_name", ""),
             ))
-            return _curses_select(all_recs, initial_chosen=set(initial_selected or set()))
+            return _curses_select(
+                all_recs,
+                initial_chosen=selected_set,
+                recommended_ids={
+                    item["record"]["dir_name"] for item in recommended
+                },
+            )
         except Exception:
             pass
 
     chosen = set(initial_selected or set())
     while True:
-        print("\\nRecommendations (toggle numbers, Enter to confirm, 'q' to cancel):")
+        query = filt.strip().lower()
+        candidates = [
+            record for record in records
+            if not query or query in " ".join((
+                record.get("dir_name") or "",
+                record.get("declared_name") or "",
+                record.get("description") or "",
+            )).lower()
+        ]
+        if query or show_all:
+            recs = recommend(
+                candidates, techs, limit=len(candidates), all_results=True,
+            )
+            view_name = "Search results" if query else "All skills"
+        else:
+            recs = recommend(candidates, techs, limit=limit)
+            view_name = "Recommendations"
+        rec_names = {item["record"]["dir_name"] for item in recs}
+        if not query:
+            for record in records:
+                if record["dir_name"] in chosen and record["dir_name"] not in rec_names:
+                    recs.append({
+                        "record": record, "score": 0,
+                        "reasons": ["currently selected"],
+                    })
+        if not recs:
+            print("No recommendations. Search with 's <text>' or browse all with 'a'.")
+            try:
+                raw = input("> ").strip()
+            except EOFError:
+                return None
+            if raw.lower() in ("", "done", "ok"):
+                return sorted(chosen)
+            if raw.lower() == "q":
+                return None
+            if raw.lower() in ("r", "c"):
+                show_all = False
+                filt = ""
+            elif raw.lower() == "a":
+                show_all = True
+                filt = ""
+            elif raw.lower().startswith("s "):
+                filt = raw[2:].strip()
+                show_all = True
+            elif raw.startswith("/"):
+                filt = raw[1:].strip()
+                show_all = True
+            continue
+        print("\n%s (toggle numbers; s <text> searches all skills; 'a' browses all; "
+              "'r' returns to recommendations; Enter confirms; 'q' cancels):" % view_name)
         for i, r in enumerate(recs, start=1):
             mark = "x" if r["record"]["dir_name"] in chosen else " "
             print("  [%s] %2d. %s (score=%d)" % (mark, i, r["record"]["dir_name"], r["score"]))
         try:
             raw = input("> ").strip()
         except EOFError:
-            raw = ""
+            return None
         if raw.lower() in ("", "done", "ok"):
-            break
+            return sorted(chosen)
         if raw.lower() == "q":
-            return []
+            return None
+        if raw.lower() == "a":
+            show_all = True
+            filt = ""
+            continue
+        if raw.lower() == "r":
+            show_all = False
+            filt = ""
+            continue
+        if raw.lower() == "c":
+            show_all = False
+            filt = ""
+            continue
+        if raw.lower().startswith("s "):
+            filt = raw[2:].strip()
+            show_all = True
+            continue
+        if raw.startswith("/"):
+            filt = raw[1:].strip()
+            show_all = True
+            continue
         for tok in raw.split():
             try:
                 idx = int(tok)
@@ -565,14 +703,24 @@ def cmd_select(args, cfg):
         for e in errors:
             print("error: %s" % e, file=sys.stderr)
         return 1
-    man, _ = load_manifest(root)
+    man, manifest_errors = load_manifest(root)
+    if man is not None and manifest_errors:
+        print("error: invalid manifest: %s" % "; ".join(manifest_errors), file=sys.stderr)
+        return 1
+    if man is None and manifest_path(root).exists():
+        print("error: unable to load existing manifest: %s" % "; ".join(manifest_errors), file=sys.stderr)
+        return 1
     initial = set(selected_ids(man)) if man else set()
-    if not sys.stdin.isatty() and not getattr(args, "yes", False):
-        print("error: interactive selection requires a TTY or --yes", file=sys.stderr)
+    if not sys.stdin.isatty():
+        print("error: interactive selection requires a TTY; --yes only confirms writes", file=sys.stderr)
         return 4
-    chosen = interactive_select(records, techs, limit=getattr(args, "limit", 20), show_all=getattr(args, "all", False), initial_selected=initial, filt=getattr(args, "filter", ""), tech=getattr(args, "tech", ""))
-    if not chosen:
-        print("No skills selected.")
+    chosen = interactive_select(
+        records, techs, limit=getattr(args, "limit", 20),
+        show_all=getattr(args, "all", False), initial_selected=initial,
+        filt=getattr(args, "filter", ""), tech=getattr(args, "tech", ""),
+    )
+    if chosen is None:
+        print("Selection cancelled.")
         return 0
     for sid in chosen:
         if not identity.is_safe_id(sid):
@@ -581,15 +729,11 @@ def cmd_select(args, cfg):
     if getattr(args, "dry_run", False):
         print("would select: %s" % ", ".join(chosen))
         return 0
-    man, errs = load_manifest(root)
     if man is None:
         man = default_manifest(root.name)
     # Replace selection entirely so unchecked skills are removed.
     man.setdefault("skills", {})["selected"] = list(chosen)
     if not _confirm("Select %s?" % ", ".join(chosen), getattr(args, "yes", False)):
-        if not sys.stdin.isatty() and not getattr(args, "yes", False):
-            print("error: confirmation required (non-TTY); use --yes", file=sys.stderr)
-            return 4
         return 0
     save_manifest(root, man)
     print("Updated %s" % manifest_path(root))
@@ -603,63 +747,161 @@ def cmd_init(args, cfg):
         print("error: %s" % e, file=sys.stderr)
         return 1
     mp = manifest_path(root)
-    if mp.exists():
-        print("manifest already exists: %s" % mp)
-        # still show detection
-    name = args.name or root.name
-    man = default_manifest(name)
-    # detect
-    techs = detect_technologies(root)
-    recs_list = []
     dry_run = getattr(args, "dry_run", False)
+    interactive = getattr(args, "interactive", False)
+    yes = getattr(args, "yes", False)
+    if interactive and not sys.stdin.isatty():
+        print("error: guided initialization requires a TTY; --yes only confirms writes", file=sys.stderr)
+        return 4
+
+    if mp.exists():
+        man, errs = load_manifest(root)
+        if man is None or errs:
+            print("error: invalid existing manifest: %s" % (
+                "; ".join(errs) if errs else "invalid manifest",
+            ), file=sys.stderr)
+            return 1
+    else:
+        man = default_manifest(args.name or root.name)
+    if args.name:
+        man.setdefault("project", {})["name"] = args.name
+
+    techs = detect_technologies(root)
     try:
-        library_root, records, warnings, errors = _discover(
-            cfg, no_cache=dry_run,
-        )
-        recs = recommend(records, techs, limit=20)
-        recs_list = [{"dir_name": r["record"]["dir_name"], "score": r["score"], "reasons": r["reasons"]} for r in recs]
-    except Exception as e:
-        warnings = [str(e)]
+        library_root, records, warnings, errors = _discover(cfg, no_cache=dry_run)
+    except DiscoveryError as error:
+        library_root = resolve_library_root(cfg)
+        if library_root.exists():
+            print("error: unable to discover skills: %s" % error, file=sys.stderr)
+            return 1
+        records, errors = [], []
+        warnings = ["skill library is not initialized: %s" % library_root]
+    if errors:
+        for error in errors:
+            print("error: %s" % error, file=sys.stderr)
+        return 1
+    for warning in warnings:
+        print("notice: %s" % warning, file=sys.stderr)
+    recs = recommend(records, techs, limit=20)
+
     print("Project root: %s" % root)
     print("Detected technologies:")
     for t in techs:
         print("  - %s (%s)" % (t["name"], ", ".join(e["file"] for e in t["evidence"])))
-    print("\nRecommended skills (not auto-selected):")
-    for r in recs_list:
-        print("  - %s (score=%d): %s" % (r["dir_name"], r["score"], "; ".join(r["reasons"])))
+    print("\n%s:" % (
+        "Recommended skills (choose below; none are auto-selected)"
+        if interactive else "Recommended skills (not auto-selected)"
+    ))
+    for rec in recs:
+        print("  - %s (score=%d): %s" % (
+            rec["record"]["dir_name"], rec["score"], "; ".join(rec["reasons"]),
+        ))
+
+    existing_manifest = mp.exists()
+    if interactive:
+        agents = man.get("agents")
+        agents = agents if isinstance(agents, dict) else {}
+        initial_agents = [
+            agent_id for agent_id, _ in SUPPORTED_AGENTS
+            if agent_is_enabled({"agents": agents}, agent_id)
+        ]
+        chosen_agents = interactive_select_agents(cfg, initial_agents)
+        if chosen_agents is None:
+            print("Initialization cancelled.")
+            return 0
+
+        existing_skill_ids = selected_ids(man)
+        chosen_skills = interactive_select(
+            records, techs, limit=20,
+            initial_selected=set(existing_skill_ids),
+        )
+        if chosen_skills is None:
+            print("Initialization cancelled.")
+            return 0
+        available_ids = {record["dir_name"] for record in records}
+        missing_selected = set(existing_skill_ids) - available_ids
+        if missing_selected:
+            print(
+                "notice: retaining selected skills not currently in the library: %s"
+                % ", ".join(sorted(missing_selected)),
+                file=sys.stderr,
+            )
+            chosen_skills = sorted(set(chosen_skills) | missing_selected)
+        for skill_id in chosen_skills:
+            if not identity.is_safe_id(skill_id):
+                print("error: unsafe skill id %r (cannot be selected)" % skill_id, file=sys.stderr)
+                return 1
+
+        updated_agents = dict(agents)
+        enabled_agents = set(chosen_agents)
+        for agent_id, _ in SUPPORTED_AGENTS:
+            settings = updated_agents.get(agent_id)
+            settings = dict(settings) if isinstance(settings, dict) else {}
+            settings["enabled"] = agent_id in enabled_agents
+            updated_agents[agent_id] = settings
+        man["agents"] = updated_agents
+        skills = man.get("skills")
+        skills = dict(skills) if isinstance(skills, dict) else {}
+        skills["selected"] = list(chosen_skills)
+        man["skills"] = skills
+
+    manifest_errors = validate_manifest(man)
+    if manifest_errors:
+        print("error: invalid project manifest: %s" % "; ".join(manifest_errors), file=sys.stderr)
+        return 1
+    _, agents_preview_message, agents_preview = generate_agents_md(
+        root, techs, cfg, write=False,
+    )
+    if agents_preview is None:
+        print("error: %s" % agents_preview_message, file=sys.stderr)
+        return 1
+
     if dry_run:
-        if not mp.exists():
-            print("would create manifest: %s" % mp)
+        if existing_manifest and not interactive:
+            print("would preserve existing manifest: %s" % mp)
         else:
-            print("manifest already exists: %s" % mp)
-        _, msg, content = generate_agents_md(root, techs, cfg, write=False)
-        if content is None:
-            print("error: %s" % msg, file=sys.stderr)
-            return 1
+            print("would %s manifest: %s" % (
+                "update" if existing_manifest else "create", mp,
+            ))
+        if interactive:
+            print("selected agents: %s" % (
+                ", ".join(chosen_agents) if chosen_agents else "(none)",
+            ))
+            print("selected skills: %s" % (
+                ", ".join(chosen_skills) if chosen_skills else "(none)",
+            ))
         print("would update managed AGENTS.md block")
+        print("would create docs/plans/ and docs/reviews/")
         return 0
-    if getattr(args, "interactive", False) and (sys.stdin.isatty() or getattr(args, "yes", False)):
-        chosen = interactive_select(records, techs, limit=20)
-        if chosen:
-            sel = selected_ids(man) if man is not None else []
-            for sid in chosen:
-                if sid not in sel:
-                    sel.append(sid)
-            man.setdefault("skills", {})["selected"] = sel
-            if _confirm("Create manifest with selection %s?" % ", ".join(chosen), getattr(args, "yes", False)):
-                save_manifest(root, man)
-                print("Created %s" % mp)
-    if not mp.exists():
-        if not _confirm("Create manifest with empty selection?", getattr(args, "yes", False)):
-            if not sys.stdin.isatty() and not getattr(args, "yes", False):
+
+    if not existing_manifest or interactive:
+        prompt = (
+            "Update project setup with agents [%s] and skills [%s]?"
+            % (", ".join(chosen_agents), ", ".join(chosen_skills))
+            if interactive else "Create manifest with empty selection?"
+        )
+        if not _confirm(prompt, yes):
+            if not sys.stdin.isatty() and not yes:
                 print("error: confirmation required (non-TTY); use --yes", file=sys.stderr)
                 return 4
+            print("Initialization cancelled.")
             return 0
         save_manifest(root, man)
-        print("Created %s" % mp)
-    wrote, msg, _content = generate_agents_md(root, techs, cfg)
+        print("%s %s" % ("Updated" if existing_manifest else "Created", mp))
+    else:
+        print("manifest already exists: %s" % mp)
+
+    _, msg, content = generate_agents_md(root, techs, cfg)
     print(msg)
-    return 0 if _content is not None else 1
+    if content is None:
+        return 1
+    try:
+        _ensure_workflow_directories(root)
+    except OSError as error:
+        print("error: failed to create docs/plans/ and docs/reviews/: %s" % error, file=sys.stderr)
+        return 1
+    print("Ensured docs/plans/ and docs/reviews/")
+    return 0
 
 
 def cmd_add(args, cfg):

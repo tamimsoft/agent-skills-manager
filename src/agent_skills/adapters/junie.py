@@ -31,7 +31,9 @@ from agent_skills.adapter_common import (
 from agent_skills.frontmatter import parse_frontmatter
 from agent_skills.links import MARKER_FILENAME, read_marker
 from agent_skills.lock import AdvisoryLock, LockError
-from agent_skills.manifest import load_manifest, selected_ids, validate_manifest
+from agent_skills.manifest import (
+    load_manifest, selected_ids, validate_manifest, agent_is_enabled,
+)
 from agent_skills.config import resolve_library_root
 from agent_skills.detection import detect_technologies
 from agent_skills.discovery import discover_skills, DiscoveryError
@@ -81,6 +83,10 @@ def launch_junie(args, cfg):
     if errs:
         print("error: invalid manifest: %s" % "; ".join(errs), file=sys.stderr)
         return 1
+
+    if not agent_is_enabled(man, "junie"):
+        print("error: Junie is disabled in .agents/skills.json; enable it before managed Junie operations", file=sys.stderr)
+        return 4
 
     sel = selected_ids(man)
     records, warnings, errors = discover_skills(
@@ -179,5 +185,13 @@ def launch_junie(args, cfg):
 
     sys.stdout.flush()
     sys.stderr.flush()
-    os.execvp(argv[0], argv)
+    try:
+        os.execvp(argv[0], argv)
+    except OSError as exc:
+        print(
+            "error: unable to launch Junie using %r; check PATH or agent_paths.junie: %s"
+            % (argv[0], exc),
+            file=sys.stderr,
+        )
+        return 127
     return 0

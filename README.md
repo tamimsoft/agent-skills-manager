@@ -52,10 +52,13 @@ agent-skills doctor
 # 1. Enter your project root.
 cd /path/to/your-project
 
-# 2. Create the manifest — detects technologies and recommends skills.
+# 2. Create the manifest and run the guided agent/skill setup.
+agent-skills init --interactive
+
+# Or create the manifest non-interactively with the existing default agent set.
 agent-skills init
 
-# 3. Select skills interactively (requires TTY; --yes accepts confirmation).
+# 3. Change the selected skill set later (requires a TTY).
 agent-skills select
 
 # 4. Or add specific skills by dir_name.
@@ -75,8 +78,12 @@ agent-skills kilo plan
 ```
 
 **First-time behavior:**
-- `init` creates `.agents/skills.json` with an empty `selected` array and merges a marked manager-owned block into `AGENTS.md`. Existing unmarked content is backed up under `.agents/backups/` and preserved.
-- Detected technologies are printed; recommended skills are shown but **not auto-selected**.
+- `init --interactive` asks which supported agents to manage, displays whether their configured executable is available, then lets you select recommended skills or search/browse the full library. Existing manifest selections and unrelated project metadata are preserved when editing.
+- In the text skill picker, enter `s <text>` (or `/text`) to search the full catalog, `a` to browse all skills, and `r` to return to recommendations. In the curses picker, type to search the full catalog.
+- Agent availability is informational: you may select a supported agent that is not currently installed or configured. Managed launch/apply commands refuse to run for agents disabled in `.agents/skills.json`.
+- Interactive selection requires a TTY; `--yes` confirms writes but never supplies agent or skill choices. Plain `init` remains non-interactive and preserves the existing default agent set with no skills auto-selected.
+- Successful initialization ensures local `docs/plans/` and `docs/reviews/` directories exist; empty directories are not tracked by Git.
+- `init` merges a marked manager-owned block into `AGENTS.md`. Existing unmarked content is backed up under `.agents/backups/` and preserved.
 - Use subcommand flags such as `select --yes`, `sync --dry-run`, `kilo apply --yes`, and `opencode apply --yes`; these flags are not global.
 
 ---
@@ -85,7 +92,7 @@ agent-skills kilo plan
 
 ```bash
 # Manifest
-agent-skills init [--yes] [--dry-run]
+agent-skills init [--interactive] [--yes] [--dry-run]
 agent-skills select [--yes] [--dry-run]
 agent-skills add SKILL [...] [--yes] [--dry-run]
 agent-skills remove SKILL [...] [--yes] [--dry-run]

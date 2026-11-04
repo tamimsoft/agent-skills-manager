@@ -78,6 +78,13 @@ def validate_manifest(data):
     agents = data.get("agents")
     if agents is not None and not isinstance(agents, dict):
         errs.append("agents must be an object")
+    elif isinstance(agents, dict):
+        for agent_id, settings in agents.items():
+            if not isinstance(agent_id, str) or not isinstance(settings, dict):
+                errs.append("each agents entry must map an agent id to an object")
+                continue
+            if "enabled" in settings and not isinstance(settings["enabled"], bool):
+                errs.append("agents.%s.enabled must be a boolean" % agent_id)
     return errs
 
 
@@ -107,3 +114,16 @@ def selected_ids(manifest):
     skills = manifest.get("skills") or {}
     sel = skills.get("selected") or []
     return [s for s in sel if isinstance(s, str)]
+
+
+def agent_is_enabled(manifest, agent_id):
+    """Return whether a manager-supported target is enabled in the manifest.
+
+    Older manifests without an agent entry retain the historical enabled
+    behavior. An explicit ``enabled: false`` opts out of managed operations.
+    """
+    agents = manifest.get("agents") if isinstance(manifest, dict) else None
+    settings = agents.get(agent_id) if isinstance(agents, dict) else None
+    if not isinstance(settings, dict):
+        return True
+    return settings.get("enabled", True)
