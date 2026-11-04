@@ -17,6 +17,7 @@ from agent_skills.discovery import discover_skills
 from agent_skills.lock import AdvisoryLock, LockError
 from agent_skills.detection import detect_technologies
 from agent_skills.identity import permission_ids_for_records
+from agent_skills.manifest import agent_is_enabled
 
 
 def _opencode_exe(cfg):
@@ -256,6 +257,8 @@ def apply(cfg, dry_run=False, yes=False):
     man, errs = load_manifest(root)
     if man is None or errs:
         return 1, "; ".join(errs) if errs else "manifest missing"
+    if not agent_is_enabled(man, "opencode"):
+        return 4, "OpenCode is disabled in .agents/skills.json; enable it before managed OpenCode operations"
     sel = selected_ids(man)
     try:
         ids, warnings, rec_map = _agent_ids_for_selected(cfg, sel)
@@ -367,7 +370,15 @@ def run(cfg, extra=None):
     argv = [_opencode_exe(cfg), "run"] + (extra or [])
     sys.stdout.flush()
     sys.stderr.flush()
-    os.execvp(argv[0], argv)
+    try:
+        os.execvp(argv[0], argv)
+    except OSError as exc:
+        print(
+            "error: unable to launch OpenCode using %r; check PATH or agent_paths.opencode: %s"
+            % (argv[0], exc),
+            file=sys.stderr,
+        )
+        return 127
     return 0
 
 

@@ -27,7 +27,7 @@ from agent_skills.frontmatter import parse_frontmatter
 from agent_skills.identity import permission_ids_for_records
 from agent_skills.links import MARKER_FILENAME, read_marker
 from agent_skills.lock import AdvisoryLock, LockError
-from agent_skills.manifest import load_manifest, selected_ids
+from agent_skills.manifest import load_manifest, selected_ids, agent_is_enabled
 from agent_skills.project import find_project_root
 from agent_skills.recommend import filter_skills_for_context
 from agent_skills.resolution import (
@@ -221,6 +221,10 @@ def launch_kilo(args, cfg):
         print("error: invalid manifest: %s" % "; ".join(errs), file=sys.stderr)
         return 1
 
+    if not agent_is_enabled(man, "kilo"):
+        print("error: Kilo is disabled in .agents/skills.json; enable it before managed Kilo operations", file=sys.stderr)
+        return 4
+
     sel = selected_ids(man)
     records, warnings, errors = discover_skills(
         library_root=resolve_library_root(cfg),
@@ -363,7 +367,15 @@ def launch_kilo(args, cfg):
         argv += passthrough
         sys.stdout.flush()
         sys.stderr.flush()
-        os.execvp(argv[0], argv)
+        try:
+            os.execvp(argv[0], argv)
+        except OSError as e:
+            print(
+                "error: unable to launch Kilo using %r; check PATH or agent_paths.kilo: %s"
+                % (argv[0], e),
+                file=sys.stderr,
+            )
+            return 127
     return 0
 
 
